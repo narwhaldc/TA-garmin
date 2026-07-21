@@ -1,15 +1,18 @@
-# TA-garmin — Garmin Add-on for the Wearables platform (FRAMING / pre-build)
+# TA-garmin — Garmin Add-on for the Wearables platform (v0.1.0)
 
-Technology add-on that normalizes raw **Garmin Health API** data into the canonical
+Technology add-on that normalizes Garmin Connect data into the canonical
 **Wearables** data model — the second vendor after `TA-oura`, and the real test of
 whether the platform is vendor-neutral.
 
-> **Status: DESIGN FRAME, not built.** Garmin's Health API is partner-gated (approval +
-> OAuth consent + commercial licensing), and the developer program has intermittently
-> been "on hold." Field-level mappings below are **provisional** — verify against the
-> Garmin **Health REST API Specification** and real **sample/backfill payloads** (Garmin's
-> dev tools provide both) before shipping. Do not cut 1.0 of anything until this frame is
-> validated against live data.
+> **Status: BUILT via Path B (v0.1.0), values pending a real device.** Ingest is the
+> **Path B pull poller** (`tools/garmin_to_hec.py` via `python-garminconnect`), because the
+> official Health API is partner-gated (legal-entity only + sign-ups suspended) — see §0.
+> The `default/props.conf` mappings use the **actual Connect-API field names** captured by
+> `tools/garmin_probe.py`, but were written from a **schema-only probe** (the test account had
+> no synced device), so **values must be validated once a real Garmin syncs**. Install +
+> ingest steps: **[INSTALL.md](INSTALL.md)**. Poller design: **[GARMIN-PATHB-POLLER.md](GARMIN-PATHB-POLLER.md)**.
+> Some field tables further down describe the *official Health API* names (Path A, shelved) —
+> the built poller/props use the Connect-API names; where they differ, the poller wins.
 
 ---
 
@@ -187,15 +190,21 @@ Phase 1 below. Caveats (docs are partner-gated — confirm with Garmin): you sti
 developer-program **account/project** to reach the tools, and whether they're usable *before*
 full partner approval vs. only after creating a project isn't publicly documented.
 
-## 7. Build plan (phased, after partner approval)
-1. Stand up the **receiver** (echo Garmin pushes → HEC `index=wearables`, stamping
-   `vendor=garmin` + `person_id` via identity map; explode HR/SpO2/stress maps). Validate with
-   Garmin's **sample data** tool first (no real user needed).
-2. Write **`TA-garmin` props/eventtypes/tags** (this scaffold) against real sample payloads;
-   validate each canonical field via MCP (same loop as TA-oura).
-3. Add the **model extensions** (§5) + surface Garmin-only tiles on Wellness/Activity.
-4. Register a real user via OAuth; **backfill**; verify per-person isolation still holds
-   (RBAC srchFilter on `person_id`) with two vendors under one person.
-5. Only then revisit **1.0** across the platform.
+## 7. Build status (Path B) & what remains
+DONE (v0.1.0):
+1. ✅ `tools/garmin_probe.py` — one-time login + sample dump (captured the real schema).
+2. ✅ `tools/garmin_to_hec.py` — pull poller: `garmin_targets.json` multi-target fan-out +
+   per-target dedup, `garmin_checkpoint.json`, `garmin_sync.lock`, HR explosion, `--backfill/
+   --date/--status/--reset-dedup/--dry-run`. Mirrors the Oura fetcher's conventions.
+3. ✅ `default/props.conf` + eventtypes/tags from the **real Connect-API keys**; Daily-root
+   model extensions added to the `wearables` app (body_battery, stress_avg, vo2max, etc.).
+4. ✅ `TA-garmin-0_1_0.spl` packaged, Cloud AppInspect + PII-scan clean.
+
+REMAINING (when the test Garmin device syncs):
+5. Run `garmin_to_hec.py --backfill <a-worn-day>`; **MCP-validate each canonical field** vs
+   `index=wearables sourcetype=garmin:*` (verify data-only keys absent on the null probe day).
+6. Confirm the existing dashboards light up for `vendor=garmin`; verify RBAC + Device picker
+   with two vendors under one `person_id`.
+7. Decide + build Garmin-only tiles (§5); then revisit **1.0** across the platform.
 
 Apache-2.0. Part of the multi-vendor wearables platform (github.com/narwhaldc).

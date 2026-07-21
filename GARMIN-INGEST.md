@@ -1,4 +1,10 @@
-# Garmin ingest — the push receiver (design)
+# Garmin ingest — Path A: the push receiver (SHELVED)
+
+> **Not the built path.** This is the *official Health API* push-receiver design, kept for the
+> "if we ever get partner/entity approval" case. The project uses **Path B** (unofficial pull
+> poller) instead — see [GARMIN-PATHB-POLLER.md](GARMIN-PATHB-POLLER.md). Access reality: README §0.
+
+
 
 Oura is pulled by a cron poller; **Garmin pushes**, so the ingest component is a small
 always-on HTTPS service that Garmin POSTs to. It is the Garmin analog of

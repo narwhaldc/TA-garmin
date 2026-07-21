@@ -1,86 +1,79 @@
-# Garmin ingest — Path B: unofficial pull poller (personal use)
+# Garmin ingest — Path B: unofficial pull poller (BUILT)
 
 The realistic route for this personal project (official Health API is entity-only + suspended,
-see README §0). A scheduled Python **poller** logs into Garmin Connect with **your own
-credentials** via the `garth` library and pulls **your own** data — the same shape as the Oura
-fetcher, just a different vendor. **This is against Garmin's API ToS and can break without
-notice; use only for your own data.**
+see README §0). `tools/garmin_to_hec.py` logs into Garmin Connect with **your own credentials**
+and pulls **your own** data — same shape/conventions as the Oura fetcher, different vendor.
+**Against Garmin's API ToS and can break without notice; use only for your own data.**
+
+> **Status: BUILT (TA-garmin 0.1.0).** Mappings written from a schema-only probe (test account
+> had no synced device); **values pending validation** once a real Garmin syncs. Auth uses
+> `python-garminconnect` **0.3.x**, which does its own SSO auth via `curl_cffi` — **no `garth`
+> needed** (earlier drafts referenced garth; 0.3.x dropped it).
 
 ```
-garmin_to_hec.py (cron)  ──garth login (your creds)──▶  Garmin Connect internal API
-        │  pulls per date: sleep, HR, dailies, stress, body battery, activities, spo2, ...
-        ▼
-   build events (sourcetype=garmin:<type>, vendor=garmin, person_id)  ──HEC──▶  index=wearables
+tools/garmin_to_hec.py (cron)  ──resume saved token──▶  Garmin Connect internal API
+   per date: sleep, HR, dailies, spo2, stress, respiration, hrv, bodycomp, usermetrics, activities
+        │  shape clean events; explode HR map -> 1 bpm/event
+        ▼  fan-out to each target in garmin_targets.json (per-target dedup)
+   sourcetype=garmin:<type>, vendor=garmin, person_id  ──HEC──▶  index=wearables
 ```
 
-## Reuse, don't reinvent
-Mirror `oura_to_hec_with_phi.py`: keep the **HEC send**, the **`wearable_fields()`** stamping
-(`vendor` + `person_id` indexed), the **per-target dedup store**, the **`CHECKPOINT_OVERLAP_DAYS`
-re-fetch window**, `--backfill YYYY-MM-DD`, and `--status`. Only the auth + the fetch calls are
-new. Recommend a **separate `garmin_to_hec.py`** (different auth/endpoints) that imports the
-shared HEC/dedup helpers rather than bolting onto the Oura script.
+## On-disk conventions (mirror the Oura fetcher)
+| file | purpose |
+|---|---|
+| `garmin_targets.json` | HEC target(s): `{targets:{name:{hec_url,hec_token,index,person_id,verify_ssl}}}` — multi-target fan-out. Env fallback: `SPLUNK_HEC_URL`/`_TOKEN` + `GARMIN_PERSON_ID` → single `default`. **gitignored (tokens)**; see `garmin_targets.example.json`. |
+| `garmin_checkpoint.json` | last-run checkpoint (atomic `.tmp`→replace) |
+| `garmin_dedup_store.json` | `"<sourcetype>::<date>" → {hash, date, sent_to[]}` — per-target dedup; adding a target backfills only it |
+| `garmin_sync.lock` | `fcntl` lock; refuses concurrent runs (cron + manual) |
+| `~/.garminconnect/` | session token — **managed by garminconnect** (its own oauth json files). Unlike Oura we don't hand-write a `garmin_tokens.json`. |
 
-## Auth (garth) — do this carefully
-- First run: `garth.login(email, password)` → handles Garmin SSO; **prompts for MFA OTP** if
-  enabled → exchanges for OAuth Bearer tokens → `garth.save("~/.garminconnect")`
-  (tokens land at `~/.garminconnect/garmin_tokens.json`).
-- Every run after: `garth.resume("~/.garminconnect")` — no password, no MFA, until the token
-  expires (OAuth2 refresh is long-lived, ~1 yr); re-login when it lapses.
-- **Credentials via env** (`GARMIN_EMAIL` / `GARMIN_PASSWORD`), never hardcoded. The token dir
-  and any creds are **gitignored + caught by the bundling PII scan**. Never ship in a `.spl`
-  (the poller is repo-only ingest tooling, like the Oura fetcher — excluded from the bundle).
+## Auth (garminconnect 0.3.x)
+- One-time: `tools/garmin_probe.py` reads `GARMIN_EMAIL`/`GARMIN_PASSWORD` from env, prompts for
+  **MFA**, and `Garmin(...).login("~/.garminconnect")` **auto-persists** the token.
+- Poller: `Garmin().login("~/.garminconnect")` **resumes** — no password/MFA — until the token
+  lapses (long-lived). Garmin **429-rate-limits the login endpoint** from a repeat IP, so the
+  poller MUST resume the saved token, never re-login per run.
 
-## Data-type → library method → sourcetype (via `python-garminconnect`, which wraps garth)
-| canonical dataset | `Garmin(...)` method (per date) | sourcetype |
-|---|---|---|
-| Sleep | `get_sleep_data(date)` | `garmin:sleeps` |
-| Heart rate (intraday) | `get_heart_rates(date)` → `heartRateValues` `[[ts_ms, bpm], …]` | `garmin:heart_rate` |
-| Daily activity/wellness | `get_stats(date)` / `get_user_summary(date)` (steps, distance, calories, intensity min, **resting HR**, stress avg) | `garmin:dailies` |
-| Workouts | `get_activities(start, limit)` | `garmin:activities` |
-| Stress / Body Battery | `get_stress(date)` / `get_body_battery(start,end)` | `garmin:stress` |
-| SpO2 | `get_spo2(date)` | `garmin:pulseox` |
-| Respiration | `get_respiration(date)` | `garmin:respiration` |
-| HRV | `get_hrv_data(date)` | `garmin:hrv` |
-| Body composition | `get_body_composition(date)` | `garmin:bodycomp` |
-| VO2max / fitness age | `get_max_metrics(date)` | `garmin:userMetrics` |
+## Data-type → method → sourcetype (python-garminconnect 0.3.x)
+| canonical dataset | method (per date) | sourcetype | tag(s) |
+|---|---|---|---|
+| Sleep | `get_sleep_data` → `dailySleepDTO.*` | `garmin:sleeps` | wearable_sleep |
+| Heart rate | `get_heart_rates` → `heartRateValues [[ts_ms,bpm]]` | `garmin:heart_rate` | wearable_heartrate |
+| Daily (activity + wellness) | `get_user_summary` | `garmin:dailies` | wearable_activity + wearable_daily |
+| Workouts | `get_activities_by_date` | `garmin:activities` | wearable_workout |
+| SpO2 | `get_spo2_data` | `garmin:pulseox` | wearable |
+| Stress | `get_stress_data` | `garmin:stress` | wearable |
+| Respiration | `get_respiration_data` | `garmin:respiration` | wearable_daily |
+| HRV | `get_hrv_data` | `garmin:hrv` | wearable_daily |
+| Body composition | `get_body_composition` | `garmin:bodycomp` | wearable_daily |
+| VO2max / fitness age | `get_max_metrics` + `get_fitnessage_data` | `garmin:usermetrics` | wearable_daily |
+| Device (model/firmware) | `get_devices` | `garmin:devices` | wearable_device |
 
-## HR explosion (same requirement as Path A, but easier here)
-`get_heart_rates(date).heartRateValues` is already an array `[[epoch_ms, bpm], …]`. The poller
-emits **one HEC event per pair** (`bpm`, `_time = epoch_ms/1000`) at `sourcetype=garmin:heart_rate`
-— no offset-map math. This gives the model its one-bpm-per-event HeartRate shape directly.
+`garmin:dailies` is the one-per-day summary → carries the daily stress/spo2/body-battery
+averages, so intraday `garmin:stress`/`garmin:pulseox` stay `tag=wearable` only (no Daily
+double-count). Field mappings live in `default/props.conf`.
 
-## ⚠ Field names differ from the scaffolded props
-The `default/props.conf` in this add-on was written against the **official Health API** field
-names (`deepSleepDurationInSeconds`, etc.). The **Connect internal API** (what garth returns)
-uses **different keys and nesting** (e.g. `deepSleepSeconds`, `sleepTimeSeconds`, `dailySleepDTO`).
-So for Path B, the props **canonical TARGET stays identical**, but every EVAL right-hand-side
-must be **re-derived from a real garth response**. Plan: dump one sample of each
-`get_*` response, then write the props from those actual keys (MCP-validate each canonical field,
-same loop as TA-oura).
+## HR explosion
+`get_heart_rates().heartRateValues` is `[[epoch_ms, bpm], …]`; the poller emits one event per
+pair (`bpm`, `_time = ms/1000`) → the model's one-bpm-per-event HeartRate shape, no offset-map.
 
-## Identity (single user → trivial)
-One person (you): stamp `vendor="garmin"`, `person_id="P001"` directly in the poller (like an
-Oura target). `wearable_identity_map` isn't needed for a single-user pull, but add a row for
-tidiness. Adding Garmin next to your Oura ring = both stamped `person_id="P001"` → they merge
-in the model automatically (Device picker separates by `device_id`).
+## Identity
+Single user: `person_id` comes from the target (`garmin_targets.json`), stamped as an INDEXED
+HEC field with `vendor="garmin"`. Adding Garmin next to your Oura ring = same `person_id` → they
+merge in the model; the Device picker separates them by `device_id`.
 
-## Caveats to resolve at build time
-1. **Python floor:** confirm `garth` / `python-garminconnect`'s minimum Python vs the Splunk
-   box's 3.9 — the poller can run wherever the Oura fetcher runs; if garth needs 3.10+, run it
-   there (it doesn't have to match the Oura script's 3.9 target unless co-located).
-2. **Rate limiting / politeness:** Garmin may throttle; backfill day-by-day with small sleeps.
-3. **MFA token lifetime + breakage:** unofficial API can change; keep the poller tolerant
-   (log + skip a failed data type, don't crash the whole run).
-4. **Secrets:** creds + `garmin_tokens.json` never committed; PII-scan gate applies.
+## Caveats
+1. **Python floor:** garminconnect 0.3.x needs **Python ≥ 3.10** (`str|None` signatures); the
+   Oura script's 3.9 interpreter won't import it — run the Garmin poller with a 3.10+ python.
+2. **Tolerance:** each `get_*` is wrapped — a failed data type logs a warning and is skipped,
+   the run continues.
+3. **Overlap dupes:** cleaned by this dedup store + the wearables app's "Wearables Dedup" saved
+   searches.
+4. **Secrets:** creds, `garmin_targets.json`, and the token dir are gitignored + PII-scanned;
+   the poller is repo-only ingest tooling, never in the `.spl`.
 
-## Build steps (Path B)
-1. `pip install garth python-garminconnect`; one-time `login()` (with MFA) → save token; confirm
-   `resume()` works headless.
-2. Write `garmin_to_hec.py` (reuse Oura HEC/dedup/backfill/status scaffolding); pull one date,
-   dump raw responses.
-3. Rewrite `default/props.conf` RHS from the real Connect-API keys; MCP-validate each canonical
-   field against `index=wearables sourcetype=garmin:*`.
-4. Add Daily-root model extensions (body_battery, stress_avg, vo2max, fitness_age, weight_kg,
-   bmi, body_fat_pct) — see README §5.
-5. Backfill; verify the existing dashboards light up for `person_id=P001, vendor=garmin`, and
-   that RBAC/Device-picker behave with two vendors under one person.
+## Remaining (when the test device syncs)
+Run `garmin_to_hec.py --backfill <a-worn-day>`, MCP-validate each canonical field vs
+`index=wearables sourcetype=garmin:*` (verify data-only keys like `dailySleepDTO.sleepScores`,
+`hrvSummary.lastNightAvg` that were absent on the null probe day), confirm dashboards light up
+for `vendor=garmin`, then decide Garmin-only tiles (README §5 / platform Task).
