@@ -1,0 +1,12 @@
+# secrets / session tokens — NEVER commit
+.garminconnect/
+*garmin_tokens*.json
+.env
+# personal sample dumps (health data + device ids)
+garmin_samples/
+tools/garmin_samples/
+# build artifacts
+*.spl
+__pycache__/
+*.pyc
+.DS_Store

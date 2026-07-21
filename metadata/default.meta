@@ -1,0 +1,17 @@
+## TA-garmin metadata (pre-build). Write is admin/sc_admin only. Normalization
+## objects exported system-wide so the wearables app + dashboards inherit the
+## canonical fields + dataset tags (same posture as TA-oura). The shared person/
+## device registries live in the `wearables` app (KV Store, exported global).
+
+[]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+[props]
+export = system
+
+[eventtypes]
+export = system
+
+[tags]
+export = system
