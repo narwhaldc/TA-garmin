@@ -46,6 +46,7 @@ re-fetch dupes are also cleaned by the wearables app's "Wearables Dedup" searche
     python3 garmin_to_hec.py --date 2026-07-18
     python3 garmin_to_hec.py --status              # per-target coverage
     python3 garmin_to_hec.py --reset-dedup [--target NAME]
+    python3 garmin_to_hec.py --generate-sample-data   # synthetic test data (no device)
     python3 garmin_to_hec.py --dry-run
 
 NOTE: field mappings written from a schema-only probe; verify values once a real
@@ -222,6 +223,48 @@ def shape_activities(acts, cal):
     return out
 
 
+def generate_sample_events():
+    """Synthetic 'one of each' dataset, timestamped ~now, for testing the pipeline
+    end-to-end WITHOUT a real Garmin device. Every event carries synthetic="true"
+    so it is trivially deletable and never mistaken for real data. Field NAMES match
+    what props expect — this proves the plumbing/mappings, NOT that the real Garmin
+    key names are correct (that still needs real data). Values are plausible & fixed
+    (no randomness) so runs are reproducible.
+    """
+    now = time.time()
+    cal = datetime.date.today().isoformat()
+    S = {"synthetic": "true", "calendarDate": cal}
+    ev = []
+    ev.append(("garmin:sleeps", now, dict(S, sleepTimeSeconds=25680, deepSleepSeconds=5400,
+        lightSleepSeconds=14880, remSleepSeconds=4800, awakeSleepSeconds=600, napTimeSeconds=0,
+        sleepScore=82)))
+    ev.append(("garmin:dailies", now, dict(S, totalSteps=8432, totalDistanceMeters=6100,
+        activeKilocalories=520, bmrKilocalories=1650, totalKilocalories=2170,
+        moderateIntensityMinutes=35, vigorousIntensityMinutes=15, dailyStepGoal=10000,
+        restingHeartRate=54, minHeartRate=48, maxHeartRate=148, averageStressLevel=38,
+        maxStressLevel=82, averageSpo2=96, lowestSpo2=92, bodyBatteryHighestValue=88,
+        bodyBatteryLowestValue=22, bodyBatteryMostRecentValue=61)))
+    for i, bpm in enumerate([58, 62, 71, 66, 84, 110, 95, 77, 64, 60, 59, 57]):  # last ~2h
+        ev.append(("garmin:heart_rate", now - (11 - i) * 600, dict(S, bpm=bpm)))
+    ev.append(("garmin:pulseox", now, dict(S, averageSpO2=96, lowestSpO2=92, latestSpO2=97)))
+    ev.append(("garmin:stress", now, dict(S, avgStressLevel=38, maxStressLevel=82)))
+    ev.append(("garmin:respiration", now, dict(S, avgSleepRespirationValue=14.2,
+        avgWakingRespirationValue=16.1, lowestRespirationValue=11.0, highestRespirationValue=20.0)))
+    ev.append(("garmin:hrv", now, dict(S, lastNightAvg=42, lastNight5MinHigh=68, weeklyAvg=45,
+        status="BALANCED")))
+    ev.append(("garmin:bodycomp", now, dict(S, weight=81200, bmi=24.5, bodyFat=18.2,
+        bodyWater=55.1, muscleMass=64000, boneMass=3200, visceralFat=8, metabolicAge=52)))
+    ev.append(("garmin:usermetrics", now, dict(S, vo2Max=44, chronologicalAge=62, fitnessAge=55)))
+    wstart = datetime.datetime.fromtimestamp(now - 2400).strftime("%Y-%m-%d %H:%M:%S")
+    ev.append(("garmin:activities", now - 2400, dict(S, activityId="SAMPLE-RUN",
+        activityName="Morning Run", activityType="running", startTimeGMT=wstart, duration=2100,
+        distance=5200, calories=340, averageHR=142, maxHR=168)))
+    ev.append(("garmin:devices", now, dict(S, deviceId="SAMPLE123",
+        productDisplayName="Garmin Forerunner 255 (SAMPLE)", softwareVersion="18.26",
+        partNumber="006-B3956-00")))
+    return ev
+
+
 def pull_day(g, cal):
     def safe(fn, *a):
         try: return fn(*a)
@@ -285,12 +328,34 @@ def main():
     ap.add_argument("--date", metavar="YYYY-MM-DD")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--reset-dedup", action="store_true")
+    ap.add_argument("--generate-sample-data", action="store_true",
+                    help="send synthetic 'one of each' events (synthetic=true) to test the "
+                         "pipeline without a real device; no Garmin login, no checkpoint/dedup")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     targets = load_targets(args.target)
 
     if args.status:
         print_status(targets); return
+
+    if args.generate_sample_data:
+        evs = generate_sample_events()
+        sent = 0
+        for tname, tcfg in targets.items():
+            batch = [to_hec(tcfg, st, t, ev) for st, t, ev in evs]
+            if not args.dry_run:
+                try:
+                    for i in range(0, len(batch), 200):
+                        hec_send(tcfg, batch[i:i + 200])
+                except Exception as e:
+                    sys.exit(f"send to '{tname}' failed: {e}")
+            sent += len(batch)
+            print(f"  {tname}: {len(batch)} synthetic events "
+                  f"({len(set(s for s, _, _ in evs))} sourcetypes) -> {tcfg['index']}")
+        print(f"\n{'(dry-run) ' if args.dry_run else ''}sent {sent} synthetic events. "
+              f"person_id={next(iter(targets.values())).get('person_id')}, all tagged synthetic=\"true\".")
+        print('CLEANUP (admin, needs can_delete): index=wearables synthetic="true" | delete')
+        return
 
     if args.reset_dedup:
         store = load_json(DEDUP_FILE, {})

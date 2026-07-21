@@ -124,6 +124,21 @@ land: `index=wearables sourcetype=garmin:devices | head 1 | eval device_id="garm
 device_name=productDisplayName, vendor="garmin", person_id="P001" | table device_id device_name
 vendor person_id | outputlookup wearable_device_profile`.
 
+## Test the pipeline without a device
+No Garmin device yet? Send a synthetic "one of each" dataset (timestamped ~now) through the
+whole pipeline to prove HEC → normalization → model → dashboards work:
+```bash
+python3 tools/garmin_to_hec.py --generate-sample-data            # sends to all targets
+python3 tools/garmin_to_hec.py --generate-sample-data --dry-run  # preview, no send
+```
+Every event is tagged **`synthetic="true"`** (no Garmin login, no checkpoint/dedup writes — safe
+to re-run). Requires `TA-garmin` + `wearables` installed so the props/tags/model fire. It proves
+the plumbing and mappings — **not** that the real Garmin field *names* are correct (that needs
+real data). **Clean up when done** (admin, needs `can_delete`):
+```
+index=wearables synthetic="true" | delete
+```
+
 ## 6. First run & backfill
 ```bash
 python3 tools/garmin_to_hec.py --dry-run --date 2026-07-18   # shape + count, no send
