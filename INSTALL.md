@@ -134,10 +134,15 @@ python3 tools/garmin_to_hec.py --generate-sample-data --dry-run  # preview, no s
 Every event is tagged **`synthetic="true"`** (no Garmin login, no checkpoint/dedup writes — safe
 to re-run). Requires `TA-garmin` + `wearables` installed so the props/tags/model fire. It proves
 the plumbing and mappings — **not** that the real Garmin field *names* are correct (that needs
-real data). **Clean up when done** (admin, needs `can_delete`):
+real data). **Clean up when done** (admin, needs `can_delete`; **set the time range to All
+time** — `| delete` obeys the time picker, so a narrow range deletes nothing):
 ```
 index=wearables synthetic="true" | delete
 ```
+> Heads-up: synthetic events are timestamped *now* and carry Oura-shaped markers
+> (`sleep_type=long_sleep`, a sleep score), so while present they can win the "most recent
+> record" in capability panels (hypnogram, contributors) and blank them. Delete them before
+> judging those panels against real data.
 
 ## 6. First run & backfill
 ```bash
