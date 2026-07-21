@@ -103,6 +103,16 @@ Add more named targets to fan out to several Splunk instances. `garmin_targets.j
 token → it is **gitignored; never commit it**. (Quick single-target alternative: skip the file
 and set `SPLUNK_HEC_URL`, `SPLUNK_HEC_TOKEN`, `GARMIN_PERSON_ID` env vars.)
 
+> **Sourcetype — set automatically, not in the targets file.** Unlike `oura_targets.json`,
+> `garmin_targets.json` has **no `sourcetype` field**. The poller stamps `sourcetype=garmin:<type>`
+> **per event, per data type** (`garmin:sleeps`, `garmin:dailies`, `garmin:heart_rate`,
+> `garmin:activities`, `garmin:pulseox`, `garmin:stress`, `garmin:respiration`, `garmin:hrv`,
+> `garmin:bodycomp`, `garmin:usermetrics`, `garmin:devices`). **Do not add a per-target
+> sourcetype** — TA-garmin's field normalization + tags key on these exact sourcetypes, so an
+> override would silently break the canonical mappings. (Oura's per-target `sourcetype` is a
+> vestigial, ignored field; this file just omits it.) `vendor` (`garmin`) and `person_id` are
+> stamped as **indexed** HEC fields per target for RBAC.
+
 ## 5. Populate the registries (KV Store)
 As a Splunk admin (KV registries live in the `wearables` app; writes are admin/sc_admin-locked):
 ```
