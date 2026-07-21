@@ -15,3 +15,6 @@ garmin_checkpoint.json
 garmin_dedup_store.json
 garmin_sync.lock
 *.tmp
+
+# HEC targets (tokens) — never commit
+garmin_targets.json
