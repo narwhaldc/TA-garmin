@@ -27,6 +27,31 @@ try:
 except ImportError:
     sys.exit("python-garminconnect not installed: pip install garminconnect curl_cffi")
 
+def load_dotenv():
+    """Populate os.environ from a local .env (KEY=VALUE lines) next to this script,
+    if present. Existing environment values win; a leading 'export ' and surrounding
+    quotes are stripped. .env is gitignored (it holds credentials) — never commit it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                if "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except IOError:
+        pass
+
+
+load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
+
 TOKENSTORE = os.path.expanduser("~/.garminconnect")
 DEFAULT_OUT = ("/private/tmp/claude-501/-Users-tvincent-src-oura-health/"
                "06121681-de58-4812-b7e4-81e69679136a/scratchpad/garmin_samples")
