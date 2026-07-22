@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.5` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.6` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -57,7 +57,7 @@ need not be internet-facing; the poller pushes to HEC. Garmin Connect is the onl
 ## 1. Install the Splunk apps
 Install both `.spl`s (Apps → Install app from file; check "Upgrade" if replacing):
 - **`wearables-0_1_19.spl`** (or later) — model + dashboards + KV registries.
-- **`TA-garmin-0_1_5.spl`** — Garmin normalization (props/eventtypes/tags).
+- **`TA-garmin-0_1_6.spl`** — Garmin normalization (props/eventtypes/tags).
 
 (`TA-oura` is only needed if you also ingest Oura.) Restart Splunk after install.
 
@@ -140,7 +140,7 @@ Every event is tagged **`synthetic="true"`** (no Garmin login, no checkpoint/ded
 to re-run). Requires `TA-garmin` + `wearables` installed so the props/tags/model fire. It proves
 the plumbing and mappings — **not** that the real Garmin field *names* are correct (that needs
 real data). **Clean up when done** (admin, needs `can_delete`; **set the time range to All
-time** — `| delete` obeys the time picker, so a narrow range deletes nothing):
+time** — the *search* honors the time picker and only the events it returns reach `| delete`, so a narrow range finds nothing to delete):
 ```
 index=wearables synthetic="true" | delete
 ```
