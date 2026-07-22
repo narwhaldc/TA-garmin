@@ -4,6 +4,10 @@ Technology add-on that normalizes Garmin Connect data into the canonical
 **Wearables** data model — the second vendor after `TA-oura`, and the real test of
 whether the platform is vendor-neutral.
 
+Companion add-ons/apps: **[TA-oura](https://github.com/narwhaldc/TA-oura)** (Oura ingest+normalization) ·
+**[wearables](https://github.com/narwhaldc/wearables)** (data model + dashboards). Like TA-oura, the
+ingest lives in `tools/` (repo-only, never in the `.spl`). Setup: **[INSTALL.md](INSTALL.md)**.
+
 > **Status: BUILT via Path B (v0.1.0), values pending a real device.** Ingest is the
 > **Path B pull poller** (`tools/garmin_to_hec.py` via `python-garminconnect`), because the
 > official Health API is partner-gated (legal-entity only + sign-ups suspended) — see §0.
