@@ -1,7 +1,11 @@
 # secrets / session tokens — NEVER commit
+# NOTE: bare names below match at ANY depth (repo ROOT *and* tools/); the **/ forms
+# are explicit belt-and-suspenders so root-level creds can never leak.
 .garminconnect/
 *garmin_tokens*.json
 .env
+/.env
+**/.env
 # personal sample dumps (health data + device ids)
 garmin_samples/
 tools/garmin_samples/
@@ -16,5 +20,6 @@ garmin_dedup_store.json
 garmin_sync.lock
 *.tmp
 
-# HEC targets (tokens) — never commit
+# HEC targets (tokens) — never commit (root and any subdir)
 garmin_targets.json
+**/garmin_targets.json
