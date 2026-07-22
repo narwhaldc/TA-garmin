@@ -103,6 +103,11 @@ Add more named targets to fan out to several Splunk instances. `garmin_targets.j
 token → it is **gitignored; never commit it**. (Quick single-target alternative: skip the file
 and set `SPLUNK_HEC_URL`, `SPLUNK_HEC_TOKEN`, `GARMIN_PERSON_ID` env vars.)
 
+> **Index (recommended: `wearables`).** Set each target's `index` here. If you use a different
+> index, it must match the **`widx` macro** in the dashboard apps (`wearables` and `oura_health`
+> each define `widx` — see their INSTALLs), so the dashboards read the same index your ingest
+> writes to. Change it in both places (target `index` + `widx`).
+
 > **Sourcetype — set automatically, not in the targets file.** Unlike `oura_targets.json`,
 > `garmin_targets.json` has **no `sourcetype` field**. The poller stamps `sourcetype=garmin:<type>`
 > **per event, per data type** (`garmin:sleeps`, `garmin:dailies`, `garmin:heart_rate`,
