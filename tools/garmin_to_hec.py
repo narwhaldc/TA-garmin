@@ -332,8 +332,15 @@ def main():
                     help="send synthetic 'one of each' events (synthetic=true) to test the "
                          "pipeline without a real device; no Garmin login, no checkpoint/dedup")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--person", metavar="PERSON_ID",
+                    help="override person_id from the targets file for all targets "
+                         "(testing/demo — e.g. send synthetic data as a different person)")
     args = ap.parse_args()
     targets = load_targets(args.target)
+    if args.person:
+        for _tcfg in targets.values():
+            _tcfg["person_id"] = args.person
+        print(f"[override] person_id set to '{args.person}' for all targets (testing)")
 
     if args.status:
         print_status(targets); return
