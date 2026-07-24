@@ -102,16 +102,18 @@ def connect():
         except (TypeError, ValueError):
             pass  # can't introspect -> construct without prompt_mfa
         g = Garmin(**gc_kwargs)
-        # Fresh credential login, then persist. Newer garminconnect can do both
-        # via login(tokenstore) (resume-or-login + auto-save), but older 0.2.x
-        # login(tokenstore) is resume-ONLY (FileNotFoundError on an empty store).
-        # So log in WITHOUT a tokenstore (fresh) and save via garth.dump — both
-        # work on every version.
-        g.login()
-        try:
+        # Persist the token in the way the installed garminconnect supports —
+        # the 0.2.x and 0.3.x lines use completely different auth backends:
+        #  - 0.2.x is garth-backed (has g.garth): login() does a fresh login with
+        #    NO tokenstore arg (login(tokenstore) there is resume-only), then
+        #    garth.dump(TOKENSTORE) writes the token.
+        #  - 0.3.x dropped garth (no g.garth) and uses its own auth: a single
+        #    login(TOKENSTORE) does the fresh login AND saves in its own format.
+        if hasattr(g, "garth"):
+            g.login()
             g.garth.dump(TOKENSTORE)
-        except Exception:
-            pass  # newer versions may already have persisted the tokens
+        else:
+            g.login(TOKENSTORE)
     finally:
         del pw  # drop the plaintext reference as soon as possible
     _lock_down_tokens()
