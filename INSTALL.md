@@ -67,9 +67,28 @@ vetted). Get both scripts onto your ingest host with a one-liner (no git require
 ```bash
 base=https://raw.githubusercontent.com/narwhaldc/TA-garmin/main/tools
 curl -O $base/garmin_to_hec.py -O $base/garmin_probe.py
-python3.10 -m pip install garminconnect curl_cffi requests
 ```
 (Or copy them from a checkout / `wget` the same URLs.)
+
+**Pick your Python first — this is where setups go sideways.** Use a **standard Python 3.10+**
+(recommended: gets garminconnect **0.3.x** + the full metric set). macOS: `brew install python@3.11`.
+Linux: your distro's `python3.11`/`python3.10`. Python **3.9 also works** but caps at garminconnect
+**0.2.x** (fewer metrics; writes a different token format — see step 3).
+> **Do NOT use Splunk's bundled Python** (`/opt/splunk/bin/python3`). `pip` will "install" into it,
+> but garminconnect's **compiled deps (`curl_cffi`, `pydantic-core`) fail to *load*** in Splunk's
+> custom build — you get a confusing "cannot import garminconnect" even though pip reports
+> everything satisfied. (It's also wiped by Splunk upgrades.) Use a real system/Homebrew Python
+> or a `venv` built from one.
+
+**Install the libs with the *exact* interpreter you'll run the scripts with** — the #1 mistake is
+installing into one Python and running with another (bare `python3` may not be the one you think).
+Verify, then install, then use that **same** command everywhere below:
+```bash
+which python3.11 && python3.11 --version                        # confirm your interpreter
+python3.11 -m pip install garminconnect curl_cffi requests
+```
+> Throughout this guide, **`python3.11` means the interpreter you just installed into** — swap in
+> `python3.10` (or a venv's `python`) if that's your choice, but keep it consistent.
 
 ## 3. One-time Garmin auth
 Create the saved session token (so the poller never needs your password/MFA again). Just run the
@@ -77,7 +96,7 @@ probe with `--login-only` — it prompts for your email, then your **password wi
 `getpass`, so it never lands in shell history) and the MFA code, creates the token, and exits
 (no sample-file dump):
 ```bash
-python3 tools/garmin_probe.py --login-only
+python3.11 tools/garmin_probe.py --login-only
 ```
 For an **unattended** first login (e.g. a headless box) you can instead supply creds via env or a
 gitignored `tools/.env` (`GARMIN_EMAIL` / `GARMIN_PASSWORD`); interactive use needs neither.
@@ -146,8 +165,8 @@ vendor person_id | outputlookup wearable_device_profile`.
 No Garmin device yet? Send a synthetic "one of each" dataset (timestamped ~now) through the
 whole pipeline to prove HEC → normalization → model → dashboards work:
 ```bash
-python3 tools/garmin_to_hec.py --generate-sample-data            # sends to all targets
-python3 tools/garmin_to_hec.py --generate-sample-data --dry-run  # preview, no send
+python3.11 tools/garmin_to_hec.py --generate-sample-data            # sends to all targets
+python3.11 tools/garmin_to_hec.py --generate-sample-data --dry-run  # preview, no send
 ```
 Every event is tagged **`synthetic="true"`** (no Garmin login, no checkpoint/dedup writes — safe
 to re-run). Requires `TA-garmin` + `wearables` installed so the props/tags/model fire. It proves
@@ -164,15 +183,16 @@ index=wearables synthetic="true" | delete
 
 ## 6. First run & backfill
 ```bash
-python3 tools/garmin_to_hec.py --dry-run --date 2026-07-18   # shape + count, no send
-python3 tools/garmin_to_hec.py --backfill 2026-01-01          # history -> HEC
-python3 tools/garmin_to_hec.py                                # incremental (checkpoint - overlap .. today)
+python3.11 tools/garmin_to_hec.py --dry-run --date 2026-07-18   # shape + count, no send
+python3.11 tools/garmin_to_hec.py --backfill 2026-01-01          # history -> HEC
+python3.11 tools/garmin_to_hec.py                                # incremental (checkpoint - overlap .. today)
 ```
 
 ## 7. Cron automation
-Run a few times a day (Garmin syncs when the app opens). Example — hourly, with the 3.10 python:
+Run a few times a day (Garmin syncs when the app opens). Use the **full path** to the same
+interpreter from step 2 (`which python3.11`) so cron doesn't fall back to a different Python:
 ```cron
-15 * * * * cd /opt/garmin && /usr/bin/python3.10 tools/garmin_to_hec.py >> garmin_to_hec.log 2>&1
+15 * * * * cd /opt/garmin && /full/path/to/python3.11 tools/garmin_to_hec.py >> /var/log/garmin_sync.log 2>&1
 ```
 The `fcntl` lock (`garmin_sync.lock`) makes overlapping cron/manual runs safe. Overlap re-fetch
 dupes are cleaned by the `wearables` app's "Wearables Dedup" scheduled searches.
@@ -181,7 +201,7 @@ dupes are cleaned by the `wearables` app's "Wearables Dedup" scheduled searches.
 ```
 index=wearables vendor=garmin | stats count by sourcetype
 index=wearables tag=wearable_activity vendor=garmin | table _time steps active_calories step_goal
-python3 tools/garmin_to_hec.py --status      # checkpoint + per-target coverage
+python3.11 tools/garmin_to_hec.py --status      # checkpoint + per-target coverage
 ```
 Then open the Today / Sleep / Heart / Activity dashboards — pick your person; Garmin data should
 populate the shared metrics (steps, sleep, HR, workouts).
@@ -204,7 +224,12 @@ All live next to the poller (all **gitignored**):
 - **429 on login** → you re-logged in too often; wait ~15–60 min, then rely on the saved token
   (routine runs *resume* and never hit the login endpoint). With creds in `tools/.env`, the poller
   self-heals a stale token on its own.
-- **`ModuleNotFoundError` / syntax error on import** → wrong Python; use **3.10+** for the poller.
+- **"cannot import garminconnect" even though pip says it's installed** → you're running a
+  *different* Python than you installed into, **or** you used **Splunk's bundled Python**
+  (`/opt/splunk/bin/python3`), whose custom build can't *load* the compiled deps
+  (`curl_cffi`/`pydantic-core`). See the real error with
+  `python3.11 -c "from garminconnect import Garmin"`, then install **and** run with the *same*
+  standard Python 3.10+ (step 2). `ModuleNotFoundError`/syntax errors on import = same root cause.
 - **Nothing in Splunk** → check HEC url/token/index in `garmin_targets.json`; `--dry-run` to see
   shaping; confirm the watch has actually synced that date to Garmin Connect.
 - **Re-send a date** → `--reset-dedup` (all) or `--reset-dedup --target NAME` (one target), then
