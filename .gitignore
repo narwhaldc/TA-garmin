@@ -22,6 +22,7 @@ garmin_dedup_store.json
 garmin_sync.lock
 *.lock
 *.tmp
+*.log
 
 # HEC targets (tokens) — never commit (root and any subdir)
 garmin_targets.json
