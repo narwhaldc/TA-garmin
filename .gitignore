@@ -18,6 +18,7 @@ __pycache__/
 garmin_checkpoint.json
 garmin_dedup_store.json
 garmin_sync.lock
+*.lock
 *.tmp
 
 # HEC targets (tokens) — never commit (root and any subdir)

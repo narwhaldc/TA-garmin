@@ -52,7 +52,7 @@ re-fetch dupes are also cleaned by the wearables app's "Wearables Dedup" searche
 NOTE: field mappings written from a schema-only probe; verify values once a real
 Garmin device syncs. Needs the python that can import garminconnect (0.3.x -> >=3.10).
 """
-import argparse, collections, datetime, fcntl, hashlib, json, os, sys, time
+import argparse, atexit, collections, datetime, fcntl, hashlib, json, os, signal, sys, time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -400,13 +400,32 @@ def main():
             DEDUP_FILE.unlink(); print(f"dedup store reset ({DEDUP_FILE})")
         if not (args.backfill or args.date): return
 
-    # exclusive lock (auto-releases on exit/crash)
+    # exclusive lock: flock auto-releases on exit/crash; we also remove the lock
+    # FILE on clean exit (atexit + SIGTERM/SIGINT) so no stale file lingers.
+    # Registered only AFTER we hold the lock, so a losing instance can't delete it.
     lock_fp = open(LOCK_FILE, "w")
     try:
         fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(f"Another instance is already running (lock: {LOCK_FILE}). Exiting.")
     lock_fp.write(str(os.getpid())); lock_fp.flush()
+
+    def _release_lock():
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_fp.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(LOCK_FILE)
+        except OSError:
+            pass
+    atexit.register(_release_lock)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
     today = date.today()
     cp = load_json(CHECKPOINT_FILE, {})
