@@ -60,8 +60,13 @@ from pathlib import Path
 try:
     import requests
     from garminconnect import Garmin
-except ImportError as e:
-    sys.exit(f"missing dep ({e.name}): pip install garminconnect curl_cffi requests")
+except Exception as e:
+    sys.exit(
+        f"cannot import deps ({e.__class__.__name__}: {e}).\n"
+        f"Install into THIS interpreter:\n"
+        f"  {sys.executable} -m pip install garminconnect curl_cffi requests\n"
+        f"If they ARE installed, a compiled dep (curl_cffi/pydantic-core) likely failed to load in\n"
+        f"this Python — use a standard Python 3.10+ (e.g. Homebrew python@3.11), not Splunk's bundled python.")
 
 def load_dotenv():
     """Populate os.environ from a local .env (KEY=VALUE lines) next to this script,

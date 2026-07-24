@@ -24,8 +24,14 @@ import argparse, datetime, getpass, inspect, json, os, sys
 
 try:
     from garminconnect import Garmin
-except ImportError:
-    sys.exit("python-garminconnect not installed: pip install garminconnect curl_cffi")
+except Exception as e:
+    sys.exit(
+        f"cannot import garminconnect ({e.__class__.__name__}: {e}).\n"
+        f"Install it into THIS interpreter:\n"
+        f"  {sys.executable} -m pip install garminconnect curl_cffi requests\n"
+        f"If it IS installed, a compiled dependency (curl_cffi/pydantic-core) likely failed to\n"
+        f"load in this Python — use a standard Python 3.10+ (e.g. Homebrew python@3.11), not\n"
+        f"Splunk's bundled python.")
 
 def load_dotenv():
     """Populate os.environ from a local .env (KEY=VALUE lines) next to this script,
