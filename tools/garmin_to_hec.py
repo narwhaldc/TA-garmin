@@ -449,13 +449,19 @@ def main():
                  if last else today - timedelta(days=OVERLAP_DAYS))
         dates = list(daterange(start, today))
 
-    g = Garmin()
+    # Resume the saved token; if creds are available (env or tools/.env), pass
+    # them so login() can self-heal — garminconnect's login(tokenstore) resumes a
+    # valid token (no network login, no 429), and only when that fails does it do
+    # a fresh login and re-save. With no creds it stays resume-only (old behavior).
+    email, pw = os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD")
+    g = Garmin(email=email, password=pw) if (email and pw) else Garmin()
     os.makedirs(TOKENSTORE, exist_ok=True)
     os.chmod(TOKENSTORE, 0o700)
     try:
         g.login(TOKENSTORE)
     except Exception as e:
-        sys.exit(f"no saved Garmin session ({e}); run tools/garmin_probe.py first")
+        sys.exit(f"Garmin login failed ({e}); set GARMIN_EMAIL/PASSWORD (env or "
+                 f"tools/.env) or run tools/garmin_probe.py")
 
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)
