@@ -20,7 +20,7 @@ ACTUAL Connect-API keys.
 Usage:
     python3 garmin_probe.py [--date YYYY-MM-DD] [--out DIR]
 """
-import argparse, datetime, getpass, json, os, sys
+import argparse, datetime, getpass, inspect, json, os, sys
 
 try:
     from garminconnect import Garmin
@@ -93,8 +93,15 @@ def connect():
     if not email or not pw:
         sys.exit("Garmin email + password required for the first login.")
     try:
-        g = Garmin(email=email, password=pw,
-                   prompt_mfa=lambda: input("Garmin MFA code: ").strip())
+        # Pass prompt_mfa only if this garminconnect version supports it — older
+        # 0.2.x releases (all that runs on Python 3.9) don't accept the kwarg.
+        gc_kwargs = {"email": email, "password": pw}
+        try:
+            if "prompt_mfa" in inspect.signature(Garmin.__init__).parameters:
+                gc_kwargs["prompt_mfa"] = lambda: input("Garmin MFA code: ").strip()
+        except (TypeError, ValueError):
+            pass  # can't introspect -> construct without prompt_mfa
+        g = Garmin(**gc_kwargs)
         g.login(TOKENSTORE)
     finally:
         del pw  # drop the plaintext reference as soon as possible
