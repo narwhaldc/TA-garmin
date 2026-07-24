@@ -73,10 +73,11 @@ python3.10 -m pip install garminconnect curl_cffi requests
 
 ## 3. One-time Garmin auth
 Create the saved session token (so the poller never needs your password/MFA again). Just run the
-probe — it prompts for your email, then your **password with no echo** (via `getpass`, so it never
-lands in shell history) and the MFA code:
+probe with `--login-only` — it prompts for your email, then your **password with no echo** (via
+`getpass`, so it never lands in shell history) and the MFA code, creates the token, and exits
+(no sample-file dump):
 ```bash
-python3 tools/garmin_probe.py
+python3 tools/garmin_probe.py --login-only
 ```
 For an **unattended** first login (e.g. a headless box) you can instead supply creds via env or a
 gitignored `tools/.env` (`GARMIN_EMAIL` / `GARMIN_PASSWORD`); interactive use needs neither.

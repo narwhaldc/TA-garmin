@@ -55,8 +55,7 @@ load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
 TOKENSTORE = os.path.expanduser(os.getenv(
     "GARMIN_TOKENSTORE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".garminconnect")))
-DEFAULT_OUT = ("/private/tmp/claude-501/-Users-tvincent-src-oura-health/"
-               "06121681-de58-4812-b7e4-81e69679136a/scratchpad/garmin_samples")
+DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garmin_samples")
 
 
 def _lock_down_tokens():
@@ -108,8 +107,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=str(datetime.date.today() - datetime.timedelta(days=1)),
                     help="calendar date YYYY-MM-DD (default: yesterday)")
-    ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--out", default=DEFAULT_OUT,
+                    help="dir for sample dumps (default: garmin_samples next to this script)")
+    ap.add_argument("--login-only", action="store_true",
+                    help="only create/verify the saved session token, then exit (no sample dump)")
     args = ap.parse_args()
+    if args.login_only:
+        connect()
+        return
     d = args.date
     os.makedirs(args.out, exist_ok=True)
     g = connect()
