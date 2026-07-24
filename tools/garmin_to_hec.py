@@ -294,21 +294,28 @@ def generate_sample_events():
 
 
 def pull_day(g, cal):
-    def safe(fn, *a):
-        try: return fn(*a)
+    def safe(name, *a):
+        # Look the method up by name so a metric that a given garminconnect
+        # version doesn't expose is skipped (not an AttributeError crash).
+        fn = getattr(g, name, None)
+        if fn is None:
+            print(f"    [skip] {name}: not available in this garminconnect version")
+            return None
+        try:
+            return fn(*a)
         except Exception as e:
-            print(f"    [warn] {fn.__name__}: {e.__class__.__name__}"); return None
+            print(f"    [warn] {name}: {e.__class__.__name__}"); return None
     ev = []
-    ev += shape_sleep(safe(g.get_sleep_data, cal), cal)
-    ev += shape_dailies(safe(g.get_user_summary, cal), cal)
-    ev += shape_heart_rate(safe(g.get_heart_rates, cal), cal)
-    ev += shape_spo2(safe(g.get_spo2_data, cal), cal)
-    ev += shape_stress(safe(g.get_stress_data, cal), cal)
-    ev += shape_respiration(safe(g.get_respiration_data, cal), cal)
-    ev += shape_hrv(safe(g.get_hrv_data, cal), cal)
-    ev += shape_bodycomp(safe(g.get_body_composition, cal), cal)
-    ev += shape_usermetrics(safe(g.get_max_metrics, cal), safe(g.get_fitnessage_data, cal), cal)
-    ev += shape_activities(safe(g.get_activities_by_date, cal, cal), cal)
+    ev += shape_sleep(safe("get_sleep_data", cal), cal)
+    ev += shape_dailies(safe("get_user_summary", cal), cal)
+    ev += shape_heart_rate(safe("get_heart_rates", cal), cal)
+    ev += shape_spo2(safe("get_spo2_data", cal), cal)
+    ev += shape_stress(safe("get_stress_data", cal), cal)
+    ev += shape_respiration(safe("get_respiration_data", cal), cal)
+    ev += shape_hrv(safe("get_hrv_data", cal), cal)
+    ev += shape_bodycomp(safe("get_body_composition", cal), cal)
+    ev += shape_usermetrics(safe("get_max_metrics", cal), safe("get_fitnessage_data", cal), cal)
+    ev += shape_activities(safe("get_activities_by_date", cal, cal), cal)
     return ev
 
 
