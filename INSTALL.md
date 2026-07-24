@@ -76,8 +76,12 @@ export GARMIN_PASSWORD='your-garmin-password'
 python3 tools/garmin_probe.py            # enter the MFA code when prompted
 unset GARMIN_EMAIL GARMIN_PASSWORD       # and clear it from shell history
 ```
-This saves the token to `~/.garminconnect/` and dumps sample payloads (safe to delete).
-The poller later does `login("~/.garminconnect")` which **resumes** that token.
+This saves the token to `tools/.garminconnect/` (gitignored; `chmod 700`) — the current
+`garminconnect`/garth backend writes **`oauth1_token.json`** (long-lived, ~1 yr) +
+**`oauth2_token.json`** (short-lived, auto-refreshed) — and dumps sample payloads (safe to
+delete). The poller later resumes from the same store. Override the location with
+`GARMIN_TOKENSTORE`. (A legacy `garmin_tokens.json` from an older backend is **not** read by
+the current library — delete it and re-run this step to generate the `oauth1`/`oauth2` pair.)
 > Garmin **429-rate-limits the login endpoint** from a repeat IP — always let the poller resume
 > the saved token; don't script a fresh login per run.
 
@@ -177,14 +181,17 @@ populate the shared metrics (steps, sleep, HR, workouts).
 All live next to the poller (all **gitignored**):
 | file | purpose |
 |---|---|
-| `~/.garminconnect/` | session token (garminconnect-managed) |
+| `.garminconnect/` | session tokens — `oauth1_token.json` + `oauth2_token.json` (garth-managed; `GARMIN_TOKENSTORE` to relocate) |
 | `garmin_targets.json` | HEC targets (**tokens** — keep private) |
 | `garmin_checkpoint.json` | last-run date |
 | `garmin_dedup_store.json` | per-`(sourcetype,date)` hash + `sent_to` targets |
-| `garmin_sync.lock` | concurrency lock (auto-released on exit) |
+| `garmin_sync.lock` | concurrency lock (auto-released + removed on exit) |
 
 ## Troubleshooting
 - **`no saved Garmin session`** → run step 3 (`garmin_probe.py`) first.
+- **Error mentioning `oauth1_token.json`** → the token store has no valid token for the current
+  backend (e.g. only a legacy `garmin_tokens.json`, or the store is empty/expired). Delete any
+  stale files in the store dir and re-run `garmin_probe.py` to mint fresh `oauth1`/`oauth2` tokens.
 - **429 on login** → you re-logged in too often; wait, then rely on the saved token (`resume`).
 - **`ModuleNotFoundError` / syntax error on import** → wrong Python; use **3.10+** for the poller.
 - **Nothing in Splunk** → check HEC url/token/index in `garmin_targets.json`; `--dry-run` to see

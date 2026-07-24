@@ -3,6 +3,8 @@
 # are explicit belt-and-suspenders so root-level creds can never leak.
 .garminconnect/
 *garmin_tokens*.json
+oauth1_token.json
+oauth2_token.json
 .env
 /.env
 **/.env

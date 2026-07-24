@@ -30,9 +30,10 @@ re-fetch dupes are also cleaned by the wearables app's "Wearables Dedup" searche
    "default" target for quick single-target use — same as the Oura script.)
 
   Env (paths/behavior):
-    GARMIN_TOKENSTORE       garminconnect token store DIR (default ~/.garminconnect).
-                            garminconnect manages its own oauth json files here;
-                            unlike Oura we don't hand-write a garmin_tokens.json.
+    GARMIN_TOKENSTORE       garminconnect token store DIR (default: .garminconnect
+                            next to this script, i.e. tools/.garminconnect — gitignored).
+                            garth writes oauth1_token.json (long-lived, ~1yr) +
+                            oauth2_token.json (short-lived, auto-refreshed) here.
     GARMIN_TARGETS_FILE     default ./garmin_targets.json
     GARMIN_CHECKPOINT_FILE  default ./garmin_checkpoint.json
     GARMIN_DEDUP_FILE       default ./garmin_dedup_store.json
@@ -87,7 +88,9 @@ def load_dotenv():
 
 load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
 
-TOKENSTORE   = os.path.expanduser(os.getenv("GARMIN_TOKENSTORE", "~/.garminconnect"))
+TOKENSTORE   = os.path.expanduser(os.getenv(
+    "GARMIN_TOKENSTORE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".garminconnect")))
 OVERLAP_DAYS = int(os.getenv("GARMIN_OVERLAP_DAYS", "3"))
 TARGETS_FILE    = Path(os.getenv("GARMIN_TARGETS_FILE",    "./garmin_targets.json"))
 CHECKPOINT_FILE = Path(os.getenv("GARMIN_CHECKPOINT_FILE", "./garmin_checkpoint.json"))
@@ -440,6 +443,8 @@ def main():
         dates = list(daterange(start, today))
 
     g = Garmin()
+    os.makedirs(TOKENSTORE, exist_ok=True)
+    os.chmod(TOKENSTORE, 0o700)
     try:
         g.login(TOKENSTORE)
     except Exception as e:

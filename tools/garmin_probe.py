@@ -52,7 +52,9 @@ def load_dotenv():
 
 load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
 
-TOKENSTORE = os.path.expanduser("~/.garminconnect")
+TOKENSTORE = os.path.expanduser(os.getenv(
+    "GARMIN_TOKENSTORE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".garminconnect")))
 DEFAULT_OUT = ("/private/tmp/claude-501/-Users-tvincent-src-oura-health/"
                "06121681-de58-4812-b7e4-81e69679136a/scratchpad/garmin_samples")
 
@@ -64,6 +66,8 @@ def connect():
     email, pw = os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD")
     g = Garmin(email=email or None, password=pw or None,
                prompt_mfa=lambda: input("Garmin MFA code: ").strip())
+    os.makedirs(TOKENSTORE, exist_ok=True)
+    os.chmod(TOKENSTORE, 0o700)
     try:
         g.login(TOKENSTORE)
     except Exception as e:
