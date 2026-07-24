@@ -20,7 +20,7 @@ ACTUAL Connect-API keys.
 Usage:
     python3 garmin_probe.py [--date YYYY-MM-DD] [--out DIR]
 """
-import argparse, datetime, json, os, sys
+import argparse, datetime, getpass, json, os, sys
 
 try:
     from garminconnect import Garmin
@@ -59,25 +59,47 @@ DEFAULT_OUT = ("/private/tmp/claude-501/-Users-tvincent-src-oura-health/"
                "06121681-de58-4812-b7e4-81e69679136a/scratchpad/garmin_samples")
 
 
+def _lock_down_tokens():
+    """Best-effort: restrict the persisted token files to owner-only (0600)."""
+    for fn in ("oauth1_token.json", "oauth2_token.json"):
+        try:
+            os.chmod(os.path.join(TOKENSTORE, fn), 0o600)
+        except OSError:
+            pass
+
+
 def connect():
-    """One call handles both cases: login(tokenstore) resumes from a saved token if
-    present, otherwise does a fresh credential login (prompting for MFA) and
-    auto-persists the token to TOKENSTORE for next time."""
-    email, pw = os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD")
-    g = Garmin(email=email or None, password=pw or None,
-               prompt_mfa=lambda: input("Garmin MFA code: ").strip())
+    """Resume the saved token if present (no creds needed); otherwise do a fresh
+    credential login and persist the token to TOKENSTORE for next time.
+
+    Hardened: the password is read with getpass — no terminal echo and never in
+    shell history. GARMIN_EMAIL / GARMIN_PASSWORD are still honored for unattended
+    (cron) first-logins, but interactive use needs no env creds at all."""
     os.makedirs(TOKENSTORE, exist_ok=True)
     os.chmod(TOKENSTORE, 0o700)
+
+    # 1) Token-only resume — needs no credentials if a valid token exists.
     try:
+        g = Garmin()
         g.login(TOKENSTORE)
-    except Exception as e:
-        # Most common cause: no saved token AND no creds in env.
-        if not email or not pw:
-            sys.exit("No saved Garmin session and no creds. First run needs:\n"
-                     "  export GARMIN_EMAIL='you@example.com'\n"
-                     "  export GARMIN_PASSWORD='...'\n"
-                     f"(original error: {e.__class__.__name__}: {e})")
-        raise
+        _lock_down_tokens()
+        print(f"[auth] resumed saved session (token at {TOKENSTORE})")
+        return g
+    except Exception:
+        pass  # no/expired token -> fall through to a credential login
+
+    # 2) Fresh login. Prefer env creds (unattended); else prompt (password hidden).
+    email = os.getenv("GARMIN_EMAIL") or input("Garmin email: ").strip()
+    pw = os.getenv("GARMIN_PASSWORD") or getpass.getpass("Garmin password: ")
+    if not email or not pw:
+        sys.exit("Garmin email + password required for the first login.")
+    try:
+        g = Garmin(email=email, password=pw,
+                   prompt_mfa=lambda: input("Garmin MFA code: ").strip())
+        g.login(TOKENSTORE)
+    finally:
+        del pw  # drop the plaintext reference as soon as possible
+    _lock_down_tokens()
     print(f"[auth] session ready (token at {TOKENSTORE})")
     return g
 

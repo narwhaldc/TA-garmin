@@ -69,13 +69,14 @@ python3.10 -m pip install garminconnect curl_cffi requests
 ```
 
 ## 3. One-time Garmin auth
-Create the saved session token (so the poller never needs your password/MFA again):
+Create the saved session token (so the poller never needs your password/MFA again). Just run the
+probe — it prompts for your email, then your **password with no echo** (via `getpass`, so it never
+lands in shell history) and the MFA code:
 ```bash
-export GARMIN_EMAIL='you@example.com'
-export GARMIN_PASSWORD='your-garmin-password'
-python3 tools/garmin_probe.py            # enter the MFA code when prompted
-unset GARMIN_EMAIL GARMIN_PASSWORD       # and clear it from shell history
+python3 tools/garmin_probe.py
 ```
+For an **unattended** first login (e.g. a headless box) you can instead supply creds via env or a
+gitignored `tools/.env` (`GARMIN_EMAIL` / `GARMIN_PASSWORD`); interactive use needs neither.
 This saves the token to `tools/.garminconnect/` (gitignored; `chmod 700`) — the current
 `garminconnect`/garth backend writes **`oauth1_token.json`** (long-lived, ~1 yr) +
 **`oauth2_token.json`** (short-lived, auto-refreshed) — and dumps sample payloads (safe to
@@ -123,7 +124,10 @@ and set `SPLUNK_HEC_URL`, `SPLUNK_HEC_TOKEN`, `GARMIN_PERSON_ID` env vars.)
 > stamped as **indexed** HEC fields per target for RBAC.
 
 ## 5. Populate the registries (KV Store)
-As a Splunk admin (KV registries live in the `wearables` app; writes are admin/sc_admin-locked):
+In the **wearables** app, open **Admin → People & Defaults** to add/edit the person (person_id,
+display name, default units, goals/height, and optionally the mapped Splunk login). The page is
+admin-only (KV writes are admin/sc_admin-locked); blank fields keep existing values. Equivalent
+raw SPL if you prefer:
 ```
 | makeresults | eval person_id="P001", person_name="Tony", step_goal=10000
 | table person_id person_name step_goal | outputlookup wearable_person_profile
