@@ -34,10 +34,10 @@ re-fetch dupes are also cleaned by the wearables app's "Wearables Dedup" searche
                             next to this script, i.e. tools/.garminconnect — gitignored).
                             garth writes oauth1_token.json (long-lived, ~1yr) +
                             oauth2_token.json (short-lived, auto-refreshed) here.
-    GARMIN_TARGETS_FILE     default ./garmin_targets.json
-    GARMIN_CHECKPOINT_FILE  default ./garmin_checkpoint.json
-    GARMIN_DEDUP_FILE       default ./garmin_dedup_store.json
-    GARMIN_LOCK_FILE        default ./garmin_sync.lock
+    GARMIN_TARGETS_FILE     default <script dir>/garmin_targets.json
+    GARMIN_CHECKPOINT_FILE  default <script dir>/garmin_checkpoint.json
+    GARMIN_DEDUP_FILE       default <script dir>/garmin_dedup_store.json
+    GARMIN_LOCK_FILE        default <script dir>/garmin_sync.lock
     GARMIN_OVERLAP_DAYS     default 3
 
   Usage:
@@ -97,10 +97,13 @@ TOKENSTORE   = os.path.expanduser(os.getenv(
     "GARMIN_TOKENSTORE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".garminconnect")))
 OVERLAP_DAYS = int(os.getenv("GARMIN_OVERLAP_DAYS", "3"))
-TARGETS_FILE    = Path(os.getenv("GARMIN_TARGETS_FILE",    "./garmin_targets.json"))
-CHECKPOINT_FILE = Path(os.getenv("GARMIN_CHECKPOINT_FILE", "./garmin_checkpoint.json"))
-DEDUP_FILE      = Path(os.getenv("GARMIN_DEDUP_FILE",      "./garmin_dedup_store.json"))
-LOCK_FILE       = Path(os.getenv("GARMIN_LOCK_FILE",       "./garmin_sync.lock"))
+# State files default to NEXT TO THIS SCRIPT (not the CWD), so cron/manual runs
+# work from any working directory — same as .env and the token store above.
+HERE = Path(__file__).resolve().parent
+TARGETS_FILE    = Path(os.getenv("GARMIN_TARGETS_FILE",    HERE / "garmin_targets.json"))
+CHECKPOINT_FILE = Path(os.getenv("GARMIN_CHECKPOINT_FILE", HERE / "garmin_checkpoint.json"))
+DEDUP_FILE      = Path(os.getenv("GARMIN_DEDUP_FILE",      HERE / "garmin_dedup_store.json"))
+LOCK_FILE       = Path(os.getenv("GARMIN_LOCK_FILE",       HERE / "garmin_sync.lock"))
 
 
 # ---------------------------------------------------------------- targets (mirrors Oura)

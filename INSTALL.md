@@ -190,11 +190,13 @@ python3.11 tools/garmin_to_hec.py                                # incremental (
 
 ## 7. Cron automation
 Run a few times a day (Garmin syncs when the app opens). Edit your crontab with `crontab -e` and add
-one line. **Replace the two ALLCAPS placeholders with your real paths** — they are NOT literal:
-- `YOUR_TOOLS_DIR` = the directory where you put the scripts in step 2 (run `pwd` there to get it).
+one line. No `cd` needed — the script finds its own state files (targets/checkpoint/dedup/token)
+next to itself regardless of the working directory. **Replace the two ALLCAPS placeholders with your
+real paths** — they are NOT literal:
 - `YOUR_PYTHON311` = the interpreter from step 2 (run `which python3.11` to get it).
+- `YOUR_TOOLS_DIR` = where you put the scripts in step 2 (run `pwd` there to get it).
 ```cron
-15 * * * * cd YOUR_TOOLS_DIR && YOUR_PYTHON311 garmin_to_hec.py >> /var/log/garmin_sync.log 2>&1
+15 * * * * YOUR_PYTHON311 YOUR_TOOLS_DIR/garmin_to_hec.py >> /var/log/garmin_sync.log 2>&1
 ```
 The `fcntl` lock (`garmin_sync.lock`) makes overlapping cron/manual runs safe. Overlap re-fetch
 dupes are cleaned by the `wearables` app's "Wearables Dedup" scheduled searches.
