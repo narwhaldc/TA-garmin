@@ -62,11 +62,14 @@ Install both `.spl`s (Apps → Install app from file; check "Upgrade" if replaci
 (`TA-oura` is only needed if you also ingest Oura.) Restart Splunk after install.
 
 ## 2. Install the poller + libraries
-The poller is repo-only ingest tooling — it is **not** in the `.spl`. Copy `tools/garmin_to_hec.py`
-(and `tools/garmin_probe.py`) to your ingest host, then:
+The poller is repo-only ingest tooling — it is **not** in the `.spl` (keeps the app Splunk-Cloud
+vetted). Get both scripts onto your ingest host with a one-liner (no git required — just `curl`):
 ```bash
+base=https://raw.githubusercontent.com/narwhaldc/TA-garmin/main/tools
+curl -O $base/garmin_to_hec.py -O $base/garmin_probe.py
 python3.10 -m pip install garminconnect curl_cffi requests
 ```
+(Or copy them from a checkout / `wget` the same URLs.)
 
 ## 3. One-time Garmin auth
 Create the saved session token (so the poller never needs your password/MFA again). Just run the
