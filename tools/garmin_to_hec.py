@@ -462,6 +462,13 @@ def main():
     except Exception as e:
         sys.exit(f"Garmin login failed ({e}); set GARMIN_EMAIL/PASSWORD (env or "
                  f"tools/.env) or run tools/garmin_probe.py")
+    # A fresh login writes the token world-readable by default; lock it to 0600
+    # (whatever the version named it — garmin_tokens.json or oauth*_token.json).
+    try:
+        for _fn in os.listdir(TOKENSTORE):
+            try: os.chmod(os.path.join(TOKENSTORE, _fn), 0o600)
+            except OSError: pass
+    except OSError: pass
 
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)

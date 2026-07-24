@@ -81,12 +81,13 @@ python3 tools/garmin_probe.py --login-only
 ```
 For an **unattended** first login (e.g. a headless box) you can instead supply creds via env or a
 gitignored `tools/.env` (`GARMIN_EMAIL` / `GARMIN_PASSWORD`); interactive use needs neither.
-This saves the token to `tools/.garminconnect/` (gitignored; `chmod 700`) — the current
-`garminconnect`/garth backend writes **`oauth1_token.json`** (long-lived, ~1 yr) +
-**`oauth2_token.json`** (short-lived, auto-refreshed) — and dumps sample payloads (safe to
-delete). The poller later resumes from the same store. Override the location with
-`GARMIN_TOKENSTORE`. (A legacy `garmin_tokens.json` from an older backend is **not** read by
-the current library — delete it and re-run this step to generate the `oauth1`/`oauth2` pair.)
+This saves the token to `tools/.garminconnect/` (gitignored; `chmod 700`/`600`) and the poller
+resumes from the same store. Override the location with `GARMIN_TOKENSTORE`.
+> **Token filename differs by library version:** garminconnect **0.3.x** (Python 3.10+,
+> recommended) writes a single **`garmin_tokens.json`**; the older **0.2.x**/garth backend
+> (the newest that installs on Python 3.9) writes **`oauth1_token.json` + `oauth2_token.json`**.
+> The two formats are **not** interchangeable — if you switch Python/library versions, clear the
+> store (`rm -f tools/.garminconnect/*`) and re-auth so the new backend writes its own format.
 > Garmin **429-rate-limits the login endpoint** from a repeat IP — always let the poller resume
 > the saved token; don't script a fresh login per run.
 
@@ -189,7 +190,7 @@ populate the shared metrics (steps, sleep, HR, workouts).
 All live next to the poller (all **gitignored**):
 | file | purpose |
 |---|---|
-| `.garminconnect/` | session tokens — `oauth1_token.json` + `oauth2_token.json` (garth-managed; `GARMIN_TOKENSTORE` to relocate) |
+| `.garminconnect/` | session token — `garmin_tokens.json` (0.3.x) or `oauth1_token.json`+`oauth2_token.json` (0.2.x/garth); `GARMIN_TOKENSTORE` to relocate |
 | `garmin_targets.json` | HEC targets (**tokens** — keep private) |
 | `garmin_checkpoint.json` | last-run date |
 | `garmin_dedup_store.json` | per-`(sourcetype,date)` hash + `sent_to` targets |
@@ -197,10 +198,12 @@ All live next to the poller (all **gitignored**):
 
 ## Troubleshooting
 - **`no saved Garmin session`** → run step 3 (`garmin_probe.py`) first.
-- **Error mentioning `oauth1_token.json`** → the token store has no valid token for the current
-  backend (e.g. only a legacy `garmin_tokens.json`, or the store is empty/expired). Delete any
-  stale files in the store dir and re-run `garmin_probe.py` to mint fresh `oauth1`/`oauth2` tokens.
-- **429 on login** → you re-logged in too often; wait, then rely on the saved token (`resume`).
+- **`Username and password are required` / can't resume** → the token store holds a token from a
+  *different* library version (e.g. 0.2.x/garth `oauth1_token.json` files while running 0.3.x, or
+  vice versa). Clear it and re-auth: `rm -f tools/.garminconnect/* && python3.x ./garmin_probe.py --login-only`.
+- **429 on login** → you re-logged in too often; wait ~15–60 min, then rely on the saved token
+  (routine runs *resume* and never hit the login endpoint). With creds in `tools/.env`, the poller
+  self-heals a stale token on its own.
 - **`ModuleNotFoundError` / syntax error on import** → wrong Python; use **3.10+** for the poller.
 - **Nothing in Splunk** → check HEC url/token/index in `garmin_targets.json`; `--dry-run` to see
   shaping; confirm the watch has actually synced that date to Garmin Connect.

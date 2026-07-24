@@ -59,12 +59,18 @@ DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garmin_s
 
 
 def _lock_down_tokens():
-    """Best-effort: restrict the persisted token files to owner-only (0600)."""
-    for fn in ("oauth1_token.json", "oauth2_token.json"):
-        try:
-            os.chmod(os.path.join(TOKENSTORE, fn), 0o600)
-        except OSError:
-            pass
+    """Best-effort: restrict ALL persisted token files to owner-only (0600).
+    Filenames differ by garminconnect version — 0.2.x/garth writes
+    oauth1_token.json + oauth2_token.json; 0.3.x writes a single
+    garmin_tokens.json — so chmod whatever is present rather than hard-coding."""
+    try:
+        for fn in os.listdir(TOKENSTORE):
+            try:
+                os.chmod(os.path.join(TOKENSTORE, fn), 0o600)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def connect():
