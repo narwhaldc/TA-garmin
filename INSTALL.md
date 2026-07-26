@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.6` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.7` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only

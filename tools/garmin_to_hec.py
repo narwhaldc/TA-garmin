@@ -238,11 +238,33 @@ def shape_usermetrics(mx, fa, cal):
     ev = {"calendarDate": cal}
     generic = (mx[0].get("generic") if isinstance(mx, list) and mx else (mx or {}).get("generic")) or {}
     ev["vo2Max"] = generic.get("vo2MaxValue")
+    chrono = None
     if isinstance(fa, dict):
-        ev["chronologicalAge"] = fa.get("chronologicalAge")
+        chrono = fa.get("chronologicalAge")
+        ev["chronologicalAge"] = chrono
         ev["fitnessAge"] = fa.get("achievableFitnessAge") or fa.get("fitnessAge")
-    if ev.get("vo2Max") is None and ev.get("fitnessAge") is None: return []
-    return [("garmin:usermetrics", midnight_epoch(cal), ev)]
+    out = []
+    if ev.get("vo2Max") is not None or ev.get("fitnessAge") is not None:
+        out.append(("garmin:usermetrics", midnight_epoch(cal), ev))
+    # chronologicalAge -> a person_info event: the Wearables age-coalesce reads
+    # person_info `age` (vendor-agnostic), so Garmin users get age/zones with no
+    # manual birth_ym entry. (Age is Garmin-computed + re-sent each run, not stale.)
+    if chrono is not None:
+        out.append(("garmin:personinfo", midnight_epoch(cal), {"age": chrono, "calendarDate": cal}))
+    return out
+
+def shape_devices(devs, cal):
+    out = []
+    for d in devs or []:
+        if not d.get("deviceId"): continue
+        out.append(("garmin:devices", midnight_epoch(cal), {
+            "deviceId": d.get("deviceId"),
+            "productDisplayName": d.get("productDisplayName") or d.get("displayName"),
+            "softwareVersion": (d.get("currentFirmwareVersion") or d.get("softwareVersion")
+                                or d.get("firmwareVersion")),
+            "partNumber": d.get("partNumber"),
+            "calendarDate": cal}))
+    return out
 
 def shape_activities(acts, cal):
     out = []
@@ -291,6 +313,7 @@ def generate_sample_events():
     ev.append(("garmin:bodycomp", now, dict(S, weight=81200, bmi=24.5, bodyFat=18.2,
         bodyWater=55.1, muscleMass=64000, boneMass=3200, visceralFat=8, metabolicAge=52)))
     ev.append(("garmin:usermetrics", now, dict(S, vo2Max=44, chronologicalAge=62, fitnessAge=55)))
+    ev.append(("garmin:personinfo", now, dict(S, age=62)))
     wstart = datetime.datetime.fromtimestamp(now - 2400).strftime("%Y-%m-%d %H:%M:%S")
     ev.append(("garmin:activities", now - 2400, dict(S, activityId="SAMPLE-RUN",
         activityName="Morning Run", activityType="running", startTimeGMT=wstart, duration=2100,
@@ -324,6 +347,7 @@ def pull_day(g, cal):
     ev += shape_bodycomp(safe("get_body_composition", cal), cal)
     ev += shape_usermetrics(safe("get_max_metrics", cal), safe("get_fitnessage_data", cal), cal)
     ev += shape_activities(safe("get_activities_by_date", cal, cal), cal)
+    ev += shape_devices(safe("get_devices"), cal)
     return ev
 
 
