@@ -68,6 +68,27 @@ except Exception as e:
         f"If they ARE installed, a compiled dep (curl_cffi/pydantic-core) likely failed to load in\n"
         f"this Python — use a standard Python 3.10+ (e.g. Homebrew python@3.11), not Splunk's bundled python.")
 
+# ---- Splunk-friendly logging (logfmt: <ts> level=.. comp=garmin msg=".." key=val) ----
+_LOG_COMPONENT = "garmin"
+
+
+def _logfmt(v):
+    s = str(v)
+    return '"' + s.replace('"', "'") + '"' if (s == "" or " " in s or "=" in s) else s
+
+
+def _log(level, msg, **kv):
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    extra = "".join(" %s=%s" % (k, _logfmt(v)) for k, v in kv.items())
+    print("%s level=%s comp=%s msg=%s%s" % (ts, level, _LOG_COMPONENT, _logfmt(msg), extra),
+          file=sys.stderr)
+
+
+def log_info(msg, **kv):  _log("INFO", msg, **kv)
+def log_warn(msg, **kv):  _log("WARN", msg, **kv)
+def log_error(msg, **kv): _log("ERROR", msg, **kv)
+
+
 def load_dotenv():
     """Populate os.environ from a local .env (KEY=VALUE lines) next to this script,
     if present. Existing environment values win; a leading 'export ' and surrounding
@@ -117,9 +138,9 @@ def load_targets(target_filter=None):
             sys.exit(f"failed to read {TARGETS_FILE}: {e}")
         for name, cfg in raw.items():
             if not cfg.get("hec_url") or not cfg.get("hec_token"):
-                print(f"[warn] target '{name}' missing hec_url/hec_token — skipping"); continue
+                log_warn("target missing hec_url/hec_token; skipping", target=name); continue
             if not cfg.get("person_id"):
-                print(f"[warn] target '{name}' has no person_id — required for wearables RBAC")
+                log_warn("target missing person_id (required for RBAC)", target=name)
             targets[name] = {
                 "hec_url": cfg["hec_url"], "hec_token": cfg["hec_token"],
                 "index": cfg.get("index", "wearables"), "vendor": cfg.get("vendor", "garmin"),
@@ -145,7 +166,7 @@ def load_targets(target_filter=None):
 def load_json(path, default):
     if path.exists():
         try: return json.loads(path.read_text())
-        except Exception as e: print(f"[warn] could not read {path} ({e}); fresh")
+        except Exception as e: log_warn("could not read state file; starting fresh", path=str(path), error=type(e).__name__)
     return default
 
 def save_json(path, obj, compact=False):
@@ -330,12 +351,12 @@ def pull_day(g, cal):
         # version doesn't expose is skipped (not an AttributeError crash).
         fn = getattr(g, name, None)
         if fn is None:
-            print(f"    [skip] {name}: not available in this garminconnect version")
+            log_warn("api method unavailable in this garminconnect version", method=name, date=cal)
             return None
         try:
             return fn(*a)
         except Exception as e:
-            print(f"    [warn] {name}: {e.__class__.__name__}"); return None
+            log_warn("api call failed", method=name, date=cal, error=e.__class__.__name__); return None
     ev = []
     ev += shape_sleep(safe("get_sleep_data", cal), cal)
     ev += shape_dailies(safe("get_user_summary", cal), cal)
@@ -449,7 +470,8 @@ def main():
     try:
         fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        sys.exit(f"Another instance is already running (lock: {LOCK_FILE}). Exiting.")
+        log_warn("another run holds the lock; exiting", lock_file=str(LOCK_FILE))
+        sys.exit(1)
     lock_fp.write(str(os.getpid())); lock_fp.flush()
 
     def _release_lock():
@@ -492,8 +514,9 @@ def main():
     try:
         g.login(TOKENSTORE)
     except Exception as e:
-        sys.exit(f"Garmin login failed ({e}); set GARMIN_EMAIL/PASSWORD (env or "
-                 f"tools/.env) or run tools/garmin_probe.py")
+        log_error("garmin login failed", error=type(e).__name__, detail=str(e),
+                  hint="set GARMIN_EMAIL/PASSWORD (env or tools/.env) or run tools/garmin_probe.py")
+        sys.exit(1)
     # A fresh login writes the token world-readable by default; lock it to 0600
     # (whatever the version named it — garmin_tokens.json or oauth*_token.json).
     try:
@@ -504,34 +527,45 @@ def main():
 
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)
-    sent_total, skipped = 0, 0
-    for cal in dates:
-        print(f"[{cal}]")
-        buckets = {}
-        for stype, t, ev in pull_day(g, cal):
-            buckets.setdefault(stype, []).append((t, ev))
-        for stype, items in buckets.items():
-            key = f"{stype}::{cal}"
-            h = _hash(items)
-            entry = store.get(key)
-            changed = not entry or entry.get("hash") != h
-            already = set() if changed else set(entry.get("sent_to", []))
-            needed = [t for t in tnames if t not in already]
-            if not needed:
-                skipped += len(items); continue
-            succeeded = list(already)
-            for tname in needed:
-                batch = [to_hec(targets[tname], stype, t, ev) for t, ev in items]
+    sent_total, skipped, fetched_total, failed = 0, 0, 0, 0
+    t0 = time.time()
+    mode = "date" if args.date else ("backfill" if args.backfill else "incremental")
+    log_info("run started", mode=mode, targets=len(targets), days=len(dates), dry_run=args.dry_run)
+    try:
+        for cal in dates:
+            buckets = {}
+            for stype, t, ev in pull_day(g, cal):
+                buckets.setdefault(stype, []).append((t, ev))
+            for stype, items in buckets.items():
+                fetched_total += len(items)
+                key = f"{stype}::{cal}"
+                h = _hash(items)
+                entry = store.get(key)
+                changed = not entry or entry.get("hash") != h
+                already = set() if changed else set(entry.get("sent_to", []))
+                needed = [t for t in tnames if t not in already]
+                if not needed:
+                    skipped += len(items); continue
+                succeeded = list(already)
+                for tname in needed:
+                    batch = [to_hec(targets[tname], stype, t, ev) for t, ev in items]
+                    if not args.dry_run:
+                        try:
+                            for i in range(0, len(batch), 200):
+                                hec_send(targets[tname], batch[i:i + 200])
+                        except Exception as e:
+                            failed += 1
+                            log_error("send failed", target=tname, sourcetype=stype, date=cal,
+                                      error=type(e).__name__, detail=str(e)); continue
+                    succeeded.append(tname); sent_total += len(items)
+                    log_info("sent events", person_id=targets[tname].get("person_id"), target=tname,
+                             sourcetype=stype, date=cal, count=len(items))
                 if not args.dry_run:
-                    try:
-                        for i in range(0, len(batch), 200):
-                            hec_send(targets[tname], batch[i:i + 200])
-                    except Exception as e:
-                        print(f"    [warn] {stype} -> {tname}: send failed ({e})"); continue
-                succeeded.append(tname); sent_total += len(items)
-            print(f"    {stype}: {len(items)} event(s) -> {needed}")
-            if not args.dry_run:
-                store[key] = {"hash": h, "date": cal, "sent_to": sorted(set(succeeded))}
+                    store[key] = {"hash": h, "date": cal, "sent_to": sorted(set(succeeded))}
+    except Exception as e:
+        log_error("run failed", error=type(e).__name__, detail=str(e),
+                  duration_s=round(time.time() - t0, 1))
+        sys.exit(1)
 
     if not args.dry_run:
         store = prune_dedup_store(store)
@@ -539,8 +573,9 @@ def main():
         cp["checkpoint"] = today.isoformat()
         cp["last_run"] = datetime.datetime.now().isoformat(timespec="seconds")
         save_json(CHECKPOINT_FILE, cp)
-    print(f"\n{'(dry-run) ' if args.dry_run else ''}sent {sent_total} events, "
-          f"skipped {skipped}. checkpoint={cp.get('checkpoint')}")
+    log_info("run complete", events=sent_total, skipped=skipped, fetched=fetched_total,
+             failures=failed, targets=len(targets), checkpoint=cp.get("checkpoint"),
+             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
