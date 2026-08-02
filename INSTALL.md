@@ -17,12 +17,13 @@ Setup for the Garmin data pipeline into the Wearables platform.
 4. [Install the poller + libraries](#2-install-the-poller--libraries)
 5. [One-time Garmin auth](#3-one-time-garmin-auth)
 6. [HEC target config](#4-hec-target-config-garmin_targetsjson)
-7. [Populate the registries](#5-populate-the-registries-kv-store)
-8. [First run & backfill](#6-first-run--backfill)
-9. [Cron automation](#7-cron-automation)
-10. [Verify](#8-verify)
-11. [State files](#state-files)
-12. [Troubleshooting](#troubleshooting)
+7. [Optional: mirror ingest logs to Splunk](#4b-optional-mirror-ingest-logs-to-splunk-ingest-health-dashboard)
+8. [Populate the registries](#5-populate-the-registries-kv-store)
+9. [First run & backfill](#6-first-run--backfill)
+10. [Cron automation](#7-cron-automation)
+11. [Verify](#8-verify)
+12. [State files](#state-files)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -48,6 +49,8 @@ need not be internet-facing; the poller pushes to HEC. Garmin Connect is the onl
 - **`wearables` app** installed (≥ 0.1.19 — provides the data model incl. the Garmin Daily-root
   fields, the KV registries, and the dashboards).
 - A Splunk **HEC token** with access to `index=wearables`.
+- *(Optional — for log mirroring, §4b)* a second index **`wearables_log`** for ingest logs, and
+  the **same HEC token** granted write access to it too (one token, two indexes).
 - A host with **Python ≥ 3.10** (garminconnect 0.3.x needs it — the Oura script's 3.9 will NOT
   import it; they can share a box but not the interpreter).
 - Your Garmin Connect **email/password** (+ MFA if enabled).
@@ -146,6 +149,26 @@ and set `SPLUNK_HEC_URL`, `SPLUNK_HEC_TOKEN`, `GARMIN_PERSON_ID` env vars.)
 > override would silently break the canonical mappings. (Oura's per-target `sourcetype` is a
 > vestigial, ignored field; this file just omits it.) `vendor` (`garmin`) and `person_id` are
 > stamped as **indexed** HEC fields per target for RBAC.
+
+## 4b. Optional: mirror ingest logs to Splunk (Ingest Health dashboard)
+The poller always writes **logfmt** logs to **stderr** (`<ts> level=… comp=garmin msg="…" …`) — the
+cron redirect (`>> /var/log/garmin_sync.log`, below) captures them. To also **mirror those logs into
+Splunk** so the wearables **Ingest Health** dashboard can show real success/failure/duration (not just
+"had new data"), add a top-level `logging` block to `garmin_targets.json`:
+```json
+"logging": { "method": "hec", "hec_logging_index": "wearables_log" }
+```
+- With `method: "hec"`, logs go to **each target's own HEC** (reusing that target's `hec_url` +
+  `hec_token`) into `hec_logging_index`. Fan out to several Splunks → **each gets its own ingest
+  logs** (run-level lines everywhere; per-target lines only to that target's Splunk).
+- **Create a second index for the logs** — `wearables_log` — separate from the `wearables` data
+  index. Splunk retention is **per-index**, so a separate index lets you keep logs ~30 days while
+  health data stays for years.
+- **The same HEC token must have write access to BOTH indexes** — the data index (`wearables`) and
+  `hec_logging_index` (`wearables_log`). One token, two indexes.
+- stderr stays on regardless; **remove the block to log to stderr only.** Logs arrive as sourcetype
+  `wearables:ingest`. Endpoint overridable per target with `hec_logging_url` / `hec_logging_token`.
+- **Per-person RBAC on the log index:** `person_id` is stamped as an **indexed field** on each per-target log line (`sent events` / `send failed`), and on run-level lines (`run started` / `run complete`) **only when the run is a single person**. So a person-scoped `srchFilter` on `wearables_log` shows a self-manager their own ingest health (including run start/stop/duration), while multi-person aggregator runs keep run-level lines admin-only (the aggregate `events=N` total is not leaked to individuals). To scope logs by person, add `wearables_log` to the wearables role's `srchFilter` (same person_id key as the data index).
 
 ## 5. Populate the registries (KV Store)
 In the **wearables** app, open **Admin → People & Defaults** to add/edit the person (person_id,

@@ -7,6 +7,8 @@ whether the platform is vendor-neutral.
 Companion add-ons/apps: **[TA-oura](https://github.com/narwhaldc/TA-oura)** (Oura ingest+normalization) ·
 **[wearables](https://github.com/narwhaldc/wearables)** (data model + dashboards). Like TA-oura, the
 ingest lives in `tools/` (repo-only, never in the `.spl`). Setup: **[INSTALL.md](INSTALL.md)**.
+Optional: mirror ingest logs to Splunk (a `logging` block in `garmin_targets.json` → the wearables
+**Ingest Health** dashboard). See INSTALL.md §4b.
 
 > **Status: BUILT via Path B (v0.1.0), values pending a real device.** Ingest is the
 > **Path B pull poller** (`tools/garmin_to_hec.py` via `python-garminconnect`), because the
