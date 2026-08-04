@@ -76,6 +76,9 @@ except Exception as e:
 # the ERROR), and if the flush itself fails (e.g. HEC is the thing that's down) the
 # lines are dumped to stderr and NEVER re-sent over HEC. Dry-run never flushes.
 _LOG_COMPONENT = "garmin"
+# Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
+# emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
+FETCHER_VERSION = "1.0.0"
 
 _LOG_SINKS = []               # [{"url","token","index","verify","targets":set(),"buf":[]}]
 _LOG_STATE = {"on": False, "dry": False, "target_pids": {}, "solo_pid": None}
@@ -628,7 +631,7 @@ def main():
     configure_hec_log(load_logging_cfg(), targets, args.dry_run)
     t0 = time.time()
     mode = "date" if args.date else ("backfill" if args.backfill else "incremental")
-    log_info("run started", mode=mode, targets=len(targets), days=len(dates), dry_run=args.dry_run)
+    log_info("run started", fetcher_ver=FETCHER_VERSION, mode=mode, targets=len(targets), days=len(dates), dry_run=args.dry_run)
     try:
         for cal in dates:
             buckets = {}
