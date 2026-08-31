@@ -1,0 +1,17 @@
+{
+  "logging": {
+    "_comment": "OPTIONAL. Mirror the fetcher's stderr logs into Splunk via HEC so the Ingest Health dashboard can show real ingest success/failure/duration. stderr is ALWAYS on regardless of this block. With method=hec the logs go to EACH target's own HEC (reusing its hec_url + hec_token) into hec_logging_index - so every Splunk you feed sees its OWN ingest health. Override the endpoint with hec_logging_url / hec_logging_token if you must. NOTE: each target's HEC token must have write access to BOTH its data index AND hec_logging_index (one token, two indexes). Provision hec_logging_index (e.g. wearables_log) once per Splunk so logs can carry a shorter retention than health data. Remove this block to log to stderr only.",
+    "method": "hec",
+    "hec_logging_index": "wearables_log"
+  },
+  "targets": {
+    "personal": {
+      "_comment": "One block per DESTINATION. Add more named targets to fan the same Garmin account out to several Splunks; add a second targets FILE (GARMIN_TARGETS_FILE=...) to run a different Garmin account for another person on the same box. person_id is REQUIRED for RBAC - register it in the wearables app first (Admin > People). Optional: vendor (default garmin) relabels the events' vendor field - almost never needed, leave it out unless you know why you want it.",
+      "hec_url":    "https://splunk:8088/services/collector/event",
+      "hec_token":  "YOUR-HEC-TOKEN",
+      "index":      "wearables",
+      "person_id":  "P001",
+      "verify_ssl": false
+    }
+  }
+}

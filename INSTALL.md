@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.7` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.8` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -116,7 +116,7 @@ resumes from the same store. Override the location with `GARMIN_TOKENSTORE`.
 ## 4. HEC target config (`garmin_targets.json`)
 Copy the example and fill in your HEC details (same format as `oura_targets.json`):
 ```bash
-cp garmin_targets.example.json garmin_targets.json
+cp tools/garmin_targets.example.json tools/garmin_targets.json
 ```
 ```json
 {
