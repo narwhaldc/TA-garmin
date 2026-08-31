@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.8` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.9` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -232,6 +232,25 @@ python3.11 tools/garmin_to_hec.py --status      # checkpoint + per-target covera
 ```
 Then open the Today / Sleep / Heart / Activity dashboards — pick your person; Garmin data should
 populate the shared metrics (steps, sleep, HR, workouts).
+
+### A metric is missing? Check the WATCH first, not the pipeline
+Several Garmin metrics are **off by default on the watch**, so the poller faithfully ingests
+nothing because nothing was ever recorded. The pipeline looks healthy (runs succeed, other
+sourcetypes populate) — the data simply doesn't exist upstream. Check these before debugging
+ingest:
+
+| Missing | Turn on (watch or Garmin Connect) |
+|---|---|
+| **SpO₂** (`garmin:pulseox`, `spo2_avg`) | **Pulse Ox** → *Settings → Health & Wellness → Pulse Oximeter* → **During Sleep** (or All Day). **Off by default on many models** to save battery. |
+| **Body Battery / stress** (`garmin:stress`) | All-day **heart-rate** tracking (both are derived from continuous HR). |
+| **HRV status** (`garmin:hrv`) | Consistent **overnight wear**, on a supported model. |
+| Data split across two Garmins | **Physio TrueUp** — syncs metrics between devices so one watch isn't siloed. |
+
+> **Real example:** a user here had respiration and HRV flowing from their Garmin while SpO₂ stayed
+> completely empty — Pulse Ox was simply never enabled. Confirmed in the data: that account's
+> `garmin:pulseox` has **zero** events all-time, and SpO₂ appeared in `garmin:dailies` only during a
+> two-week window (the period the setting happened to be on) and stopped. The Wellness → Vitals
+> glossary in the `wearables` app carries the same caveat for dashboard viewers.
 
 ## State files
 All live next to the poller (all **gitignored**):
