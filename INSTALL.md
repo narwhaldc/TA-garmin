@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.9` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.10` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -241,10 +241,43 @@ ingest:
 
 | Missing | Turn on (watch or Garmin Connect) |
 |---|---|
-| **SpO₂** (`garmin:pulseox`, `spo2_avg`) | **Pulse Ox** → *Settings → Health & Wellness → Pulse Oximeter* → **During Sleep** (or All Day). **Off by default on many models** to save battery. |
+| **SpO₂** (`garmin:pulseox`, `spo2_avg`) | **Pulse Ox** — **off by default on many models** to save battery. Walkthrough below. |
 | **Body Battery / stress** (`garmin:stress`) | All-day **heart-rate** tracking (both are derived from continuous HR). |
 | **HRV status** (`garmin:hrv`) | Consistent **overnight wear**, on a supported model. |
-| Data split across two Garmins | **Physio TrueUp** — syncs metrics between devices so one watch isn't siloed. |
+| Data split across two Garmins | **Physio TrueUp** — *Garmin Connect → Settings → User Settings → Physio TrueUp* — syncs metrics between devices so one watch isn't siloed. |
+
+#### Enabling Pulse Ox (SpO₂) — step by step
+Menu wording varies a little by model; this is the common path on modern watches (Forerunner,
+Venu, fēnix, vívoactive). If yours differs, search "Pulse Ox" in Garmin's support site for your
+exact model.
+
+**On the watch:**
+1. Hold the **MENU** button (or press **Start → Settings** on touch-only models).
+2. **Settings → Health & Wellness → Pulse Ox** *(older firmware: Settings → Sensors & Accessories
+   → Pulse Oximeter)*.
+3. Choose a **tracking mode**:
+   - **Off** — the default on many models. No SpO₂ is ever recorded.
+   - **During Sleep** — ✅ **recommended.** Samples only while you sleep. This is what populates
+     `spo2_avg` and costs little battery.
+   - **All Day** — continuous spot checks. Richest data, but a **noticeable battery hit** (often
+     cited around a day or more of runtime on some models).
+4. Optionally enable **Acclimation** if you want altitude-adjusted readings while travelling.
+
+**Or from your phone** (some models only expose it here): *Garmin Connect app → **⋯ More** →
+**Garmin Devices** → your watch → **Health & Wellness** (or **Sensors**) → **Pulse Ox** → pick the
+mode.* Changes apply on the watch's next sync.
+
+**What to expect afterward:**
+- **It is not retroactive.** Garmin can only report what the watch recorded, so `--backfill` will
+  **not** fill in SpO₂ for days the setting was off. Data starts from the moment you enable it.
+- With **During Sleep**, readings appear after your next full night + sync — not immediately.
+- Verify it reached Splunk once a night has passed:
+  ```
+  index=wearables vendor=garmin sourcetype=garmin:dailies | where isnum(spo2_avg)
+  | table _time spo2_avg | sort - _time
+  ```
+  Still empty after a night's sync? Confirm the mode actually stuck on the watch (a factory reset
+  or firmware update can silently revert it to Off).
 
 > **Real example:** a user here had respiration and HRV flowing from their Garmin while SpO₂ stayed
 > completely empty — Pulse Ox was simply never enabled. Confirmed in the data: that account's
