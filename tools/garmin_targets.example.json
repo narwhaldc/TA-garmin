@@ -7,10 +7,11 @@
   "targets": {
     "personal": {
       "_comment": "One block per DESTINATION. Add more named targets to fan the same Garmin account out to several Splunks; add a second targets FILE (GARMIN_TARGETS_FILE=...) to run a different Garmin account for another person on the same box. person_id is REQUIRED for RBAC - register it in the wearables app first (Admin > People). Optional: vendor (default garmin) relabels the events' vendor field - almost never needed, leave it out unless you know why you want it.",
-      "hec_url":    "https://splunk:8088/services/collector/event",
-      "hec_token":  "YOUR-HEC-TOKEN",
-      "index":      "wearables",
-      "person_id":  "P001",
+      "_comment_hec_url": "Splunk Cloud uses a DIFFERENT hostname than your search head, and the form depends on which cloud provider hosts your stack - a one-character difference that FAILS SILENTLY. AWS:  https://http-inputs-<host>.splunkcloud.com:443/services/collector/event  (HYPHEN after http-inputs). GCP:  https://http-inputs.<host>.splunkcloud.com:443/services/collector/event  (DOT after http-inputs). On-prem/self-managed is just your indexer or LB on port 8088, as shown below. Always the /event endpoint, never /raw. Get the exact URL from Splunk Web > Settings > Data Inputs > HTTP Event Collector.",
+      "hec_url": "https://splunk:8088/services/collector/event",
+      "hec_token": "YOUR-HEC-TOKEN",
+      "index": "wearables",
+      "person_id": "P001",
       "verify_ssl": false
     }
   }
