@@ -78,7 +78,7 @@ except Exception as e:
 _LOG_COMPONENT = "garmin"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.0.0"
+FETCHER_VERSION = "1.1.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -517,6 +517,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target")
     ap.add_argument("--backfill", metavar="YYYY-MM-DD")
+    ap.add_argument("--backfill-end", metavar="YYYY-MM-DD",
+                     help="bound a backfill to end on this date (inclusive) instead of today. "
+                          "Only meaningful with --backfill. Does NOT advance the checkpoint, "
+                          "since it doesn't cover through today.")
     ap.add_argument("--date", metavar="YYYY-MM-DD")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--reset-dedup", action="store_true")
@@ -595,12 +599,40 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
+    try:
+        sync(targets, backfill_date=args.backfill, backfill_end_date=args.backfill_end,
+             single_date=args.date, dry_run=args.dry_run)
+    except RuntimeError as e:
+        log.error(str(e))
+        sys.exit(1)
+    except Exception:
+        # sync() already logged the failure via log_error before re-raising
+        sys.exit(1)
+
+
+def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, dry_run=False):
+    """
+    Run one Garmin fetch-and-send pass over `targets` and return
+    {"sent", "skipped", "fetched", "failed"}.
+
+    Extracted out of main() so a future master orchestrator (or an
+    embedded-interpreter mobile build) can call this directly in-process for
+    one vendor among several. main() still does argparse, --status/
+    --generate-sample-data/--reset-dedup handling, and the single-instance
+    file lock; this assumes all of that already happened and `targets` is
+    the final resolved dict.
+
+    Raises RuntimeError (via login failure or a run failure) rather than
+    calling sys.exit, so a caller running several vendors in one process can
+    catch one vendor's failure without killing the others.
+    """
     today = date.today()
     cp = load_json(CHECKPOINT_FILE, {})
-    if args.date:
-        dates = [args.date]
-    elif args.backfill:
-        dates = list(daterange(date.fromisoformat(args.backfill), today))
+    if single_date:
+        dates = [single_date]
+    elif backfill_date:
+        end = date.fromisoformat(backfill_end_date) if backfill_end_date else today
+        dates = list(daterange(date.fromisoformat(backfill_date), end))
     else:
         last = cp.get("checkpoint")
         start = (date.fromisoformat(last) - timedelta(days=OVERLAP_DAYS)
@@ -618,9 +650,10 @@ def main():
     try:
         g.login(TOKENSTORE)
     except Exception as e:
-        log_error("garmin login failed", error=type(e).__name__, detail=str(e),
-                  hint="set GARMIN_EMAIL/PASSWORD (env or tools/.env) or run tools/garmin_probe.py")
-        sys.exit(1)
+        raise RuntimeError(
+            f"garmin login failed ({type(e).__name__}: {e}) — set GARMIN_EMAIL/PASSWORD "
+            "(env or tools/.env) or run tools/garmin_probe.py"
+        ) from e
     # A fresh login writes the token world-readable by default; lock it to 0600
     # (whatever the version named it — garmin_tokens.json or oauth*_token.json).
     try:
@@ -632,10 +665,11 @@ def main():
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)
     sent_total, skipped, fetched_total, failed = 0, 0, 0, 0
-    configure_hec_log(load_logging_cfg(), targets, args.dry_run)
+    configure_hec_log(load_logging_cfg(), targets, dry_run)
     t0 = time.time()
-    mode = "date" if args.date else ("backfill" if args.backfill else "incremental")
-    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=mode, targets=len(targets), days=len(dates), dry_run=args.dry_run)
+    mode = "date" if single_date else ("backfill" if backfill_date else "incremental")
+    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=mode, targets=len(targets), days=len(dates),
+             backfill_end=backfill_end_date, dry_run=dry_run)
     try:
         for cal in dates:
             buckets = {}
@@ -654,7 +688,7 @@ def main():
                 succeeded = list(already)
                 for tname in needed:
                     batch = [to_hec(targets[tname], stype, t, ev) for t, ev in items]
-                    if not args.dry_run:
+                    if not dry_run:
                         try:
                             for i in range(0, len(batch), 200):
                                 hec_send(targets[tname], batch[i:i + 200])
@@ -665,22 +699,38 @@ def main():
                     succeeded.append(tname); sent_total += len(items)
                     log_info("sent events", person_id=targets[tname].get("person_id"), target=tname,
                              sourcetype=stype, date=cal, count=len(items))
-                if not args.dry_run:
+                if not dry_run:
                     store[key] = {"hash": h, "date": cal, "sent_to": sorted(set(succeeded))}
     except Exception as e:
         log_error("run failed", error=type(e).__name__, detail=str(e),
                   duration_s=round(time.time() - t0, 1))
-        sys.exit(1)
+        raise
 
-    if not args.dry_run:
+    if not dry_run:
         store = prune_dedup_store(store)
         save_json(DEDUP_FILE, store, compact=True)
-        cp["checkpoint"] = today.isoformat()
+        # Advance the checkpoint to the LATEST date this run actually covered, but NEVER
+        # backward. A bounded backfill covering an old historical gap (end date earlier
+        # than the existing checkpoint) must not regress it -- that would make the next
+        # incremental run needlessly reprocess days already covered. Conversely, if there
+        # is no existing checkpoint (a brand-new target, e.g. a freshly onboarded person)
+        # and this run's end is later than "nothing", advancing to it closes exactly the
+        # gap a plain "leave it untouched" approach would otherwise leave for the next
+        # incremental run to fall into. --date shares this fix: it previously stamped
+        # "today" unconditionally too, which was wrong for the same reason.
+        run_end = (single_date if single_date
+                   else backfill_end_date if backfill_end_date
+                   else today.isoformat())
+        existing = cp.get("checkpoint")
+        if not existing or run_end > existing:
+            cp["checkpoint"] = run_end
         cp["last_run"] = datetime.datetime.now().isoformat(timespec="seconds")
         save_json(CHECKPOINT_FILE, cp)
     log_info("run complete", events=sent_total, skipped=skipped, fetched=fetched_total,
              failures=failed, targets=len(targets), checkpoint=cp.get("checkpoint"),
-             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
+             duration_s=round(time.time() - t0, 1), dry_run=dry_run)
+    flush_hec_log()
+    return {"sent": sent_total, "skipped": skipped, "fetched": fetched_total, "failed": failed}
 
 
 if __name__ == "__main__":

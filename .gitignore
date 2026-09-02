@@ -27,3 +27,10 @@ garmin_sync.lock
 # HEC targets (tokens) — never commit (root and any subdir)
 garmin_targets.json
 **/garmin_targets.json
+
+# Per-person fetcher instances (e.g. Liz's own copy) — a full duplicate of the
+# script + its OWN .env/tokenstore/targets/state, not vendor code. Excluded
+# entirely (not just the secret files above) so an accidental `git add` can
+# never introduce a second, silently-drifting copy of the fetcher into the repo.
+tools_liz/
+**/tools_liz/
