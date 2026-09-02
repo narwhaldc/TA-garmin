@@ -208,8 +208,16 @@ index=wearables synthetic="true" | delete
 ```bash
 python3.11 tools/garmin_to_hec.py --dry-run --date 2026-07-18   # shape + count, no send
 python3.11 tools/garmin_to_hec.py --backfill 2026-01-01          # history -> HEC
+python3.11 tools/garmin_to_hec.py --backfill 2026-01-01 --backfill-end 2026-03-31   # bounded range
 python3.11 tools/garmin_to_hec.py                                # incremental (checkpoint - overlap .. today)
 ```
+`--backfill-end` matters more here than for the other TAs: Garmin's fetcher pulls **one day at a
+time** (not a single ranged query), so a long `--backfill` means many sequential API calls, and
+Garmin's login/data endpoints are rate-limited with no documented recovery window. Splitting a
+large backfill into a few smaller `--backfill`/`--backfill-end` chunks — run on separate days if
+you can — is meaningfully safer than one open-ended request. The checkpoint correctly advances to
+the *later* of its existing value vs. this run's actual end (never backward), so a bounded chunk
+never creates a gap for the next incremental run to miss.
 
 ## 7. Cron automation
 Run a few times a day (Garmin syncs when the app opens). Edit your crontab with `crontab -e` and add
