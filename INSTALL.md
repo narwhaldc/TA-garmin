@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.11` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.12` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -147,6 +147,8 @@ Either put it in `tools/.env` (gitignored) alongside the other settings:
 GARMIN_PERSONAL_API_KEY=paste-the-key-here
 GARMIN_PERSONAL_KEY_EXPIRES=2027-11-05      # the expiry date from step 4 (YYYY-MM-DD)
 ```
+Then **`chmod 600 tools/.env`** — it holds your Garmin password and the key.
+
 …or keep it in a one-line file outside the repo (`chmod 600`) and point `GARMIN_PERSONAL_API_KEY_FILE`
 at it (default `~/.config/garmin/connect-personal-api-key`). The environment variable wins over the file.
 > `.env` files are gitignored at the repo root **and** in `tools/`. Still, run `git status` before
@@ -205,6 +207,10 @@ Pick a **date the watch was worn** — a day with no sync correctly returns empt
 Copy the example and fill in your HEC details (same format as `oura_targets.json`):
 ```bash
 cp tools/garmin_targets.example.json tools/garmin_targets.json
+```
+**Lock the secret files down** — they hold tokens/credentials, and the fetcher runs as you, so owner-only is all it needs:
+```bash
+chmod 600 tools/garmin_targets.json tools/.env   # .env only if you keep credentials or the Personal API key there
 ```
 ```json
 {
