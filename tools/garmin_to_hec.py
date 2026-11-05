@@ -78,7 +78,7 @@ except Exception as e:
 _LOG_COMPONENT = "garmin"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.1.0"
+FETCHER_VERSION = "1.2.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -476,6 +476,157 @@ def pull_day(g, cal):
     return ev
 
 
+# ---------------------------------------------------------------- Personal API key lifecycle
+# Garmin's official Personal API authenticates with a user-minted KEY (max 1 year, shown once,
+# manual re-mint) that is exchanged for a 24h bearer token on every run (no refresh tokens).
+# The key silently dying is the main new ops risk, so it is surfaced three ways, all as
+# logfmt lines the Ingest Health dashboard already reads (see wearables_admin_ingesthealth):
+#   1. REJECTED  - HTTP 401/403 on token exchange -> GarminKeyError -> caller logs
+#                  msg="run failed" error=KeyRejected detail="<what to do>" (shows in
+#                  "Users needing attention" + Feed status FAILED).
+#   2. DECLARED  - GARMIN_PERSONAL_KEY_EXPIRES=YYYY-MM-DD (the date the key was minted for)
+#                  -> msg="personal api key expiring" days_left=N: WARN <=30d, ERROR <=7d.
+#   3. TOKEN     - a token whose lifetime (exp-iat) is under 23h means the key itself dies
+#                  within a day (Garmin: token valid "24h or until the key expires").
+# While healthy we still log msg="personal api key ok" so the dashboard can tell "renewed"
+# from "never warned" (the latest of ok/expiring per person wins).
+PERSONAL_BASE = os.getenv("GARMIN_PERSONAL_API_BASE_URL", "https://personal.connectapi.garmin.com")
+PERSONAL_TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
+PERSONAL_KEY_FILE = os.path.expanduser(
+    os.getenv("GARMIN_PERSONAL_API_KEY_FILE", "~/.config/garmin/connect-personal-api-key"))
+KEY_WARN_DAYS = int(os.getenv("GARMIN_KEY_WARN_DAYS", "30"))
+KEY_ERROR_DAYS = int(os.getenv("GARMIN_KEY_ERROR_DAYS", "7"))
+KEY_FIX = ("Mint a new key at Garmin Connect (Settings > Personal API, expiry 1 year), save it as "
+           "GARMIN_PERSONAL_API_KEY in tools/.env, and set GARMIN_PERSONAL_KEY_EXPIRES to the "
+           "new expiry date")
+
+
+class GarminKeyError(RuntimeError):
+    """The Personal API key itself is the problem (missing/rejected): a human must act.
+    Deliberately NOT raised for network errors or 5xx — those are transient, and telling
+    someone to mint a new key because Garmin had a bad minute would be wrong."""
+    def __init__(self, code, detail):
+        super().__init__(detail)
+        self.code, self.detail = code, detail
+
+
+def _personal_ssl_context():
+    """TLS verification stays ON. On macOS behind a TLS-intercepting proxy (Cisco) the proxy
+    root CA is only in the system keychain, so also trust the keychain certs (what curl uses).
+    SSL_CERT_FILE, if set, wins. In-memory only; nothing is written."""
+    import ssl
+    cafile = os.getenv("SSL_CERT_FILE") or None
+    ctx = ssl.create_default_context(cafile=cafile)
+    if cafile is None and sys.platform == "darwin":
+        import subprocess
+        for kc in ("/System/Library/Keychains/SystemRootCertificates.keychain",
+                   "/Library/Keychains/System.keychain"):
+            try:
+                pem = subprocess.run(["security", "find-certificate", "-a", "-p", kc],
+                                     capture_output=True, text=True, timeout=30).stdout
+                if pem.strip():
+                    ctx.load_verify_locations(cadata=pem)
+            except Exception:
+                pass
+    return ctx
+
+
+def personal_api_key():
+    key = os.getenv("GARMIN_PERSONAL_API_KEY", "").strip()
+    if not key:
+        try:
+            key = Path(PERSONAL_KEY_FILE).read_text().strip()
+        except OSError:
+            pass
+    if not key:
+        raise GarminKeyError("KeyMissing", "No Garmin Personal API key found (GARMIN_PERSONAL_API_KEY "
+                             "or %s). %s" % (PERSONAL_KEY_FILE, KEY_FIX))
+    return key
+
+
+def mint_personal_token(key):
+    """Exchange the key for a 24h bearer token (the response body is the raw JWT, not JSON).
+    401/403 -> GarminKeyError (rejected/expired/revoked/wrong key); anything else that fails
+    -> plain RuntimeError (transient: do NOT tell the user to re-mint)."""
+    import urllib.error, urllib.request
+    req = urllib.request.Request(PERSONAL_BASE + PERSONAL_TOKEN_PATH, data=b"", method="POST",
+                                 headers={"Authorization": "ApiKey " + key, "Accept": "*/*"})
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_personal_ssl_context()))
+    try:
+        with opener.open(req, timeout=30) as r:
+            tok = r.read().decode().strip()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise GarminKeyError("KeyRejected", "Garmin rejected the Personal API key (HTTP %d: expired, "
+                                 "revoked or wrong). %s" % (e.code, KEY_FIX))
+        raise RuntimeError("token exchange failed: HTTP %d (transient? retry next run)" % e.code)
+    except Exception as e:
+        raise RuntimeError("token exchange failed: %s: %s (network/TLS, not a key problem)"
+                           % (type(e).__name__, e))
+    if tok.count(".") != 2:
+        raise RuntimeError("token exchange returned something that is not a JWT - API shape changed?")
+    return tok
+
+
+def jwt_claims(token):
+    """JWT payload as a dict (NO signature check - we only read timing); {} if undecodable."""
+    import base64
+    try:
+        seg = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)).decode())
+    except Exception:
+        return {}
+
+
+def personal_key_expiry(token, today=None):
+    """-> {"days_left": int, "expires": "YYYY-MM-DD"|"", "source": "declared"|"token"} for the
+    soonest-expiring signal, or None when nothing is known. days_left < 0 means the declared
+    date has passed even though Garmin still accepts the key (stale GARMIN_PERSONAL_KEY_EXPIRES)."""
+    today = today or date.today()
+    found = []
+    raw = os.getenv("GARMIN_PERSONAL_KEY_EXPIRES", "").strip()
+    if raw:
+        try:
+            d = date.fromisoformat(raw)
+            found.append({"days_left": (d - today).days, "expires": d.isoformat(), "source": "declared"})
+        except ValueError:
+            log_warn("GARMIN_PERSONAL_KEY_EXPIRES is not YYYY-MM-DD; ignoring", value=raw)
+    c = jwt_claims(token)
+    iat, exp = c.get("iat"), c.get("exp")
+    if isinstance(iat, (int, float)) and isinstance(exp, (int, float)) and (exp - iat) < 23 * 3600:
+        found.append({"days_left": 0, "source": "token",
+                      "expires": datetime.datetime.fromtimestamp(exp).date().isoformat()})
+    return min(found, key=lambda f: f["days_left"]) if found else None
+
+
+def check_personal_key(person_id=None, today=None):
+    """Mint a token and log the key's health. Returns the bearer token. Raises GarminKeyError
+    when the key is missing/rejected (caller logs the failed run); RuntimeError if transient.
+    Call AFTER configure_hec_log() so the lines reach Splunk."""
+    token = mint_personal_token(personal_api_key())
+    ex = personal_key_expiry(token, today)
+    kv = {"person_id": person_id} if person_id else {}
+    if ex is None:
+        log_info("personal api key ok", expires="unknown",
+                 hint="set GARMIN_PERSONAL_KEY_EXPIRES=YYYY-MM-DD for early expiry warnings", **kv)
+    elif ex["days_left"] < 0:
+        log_warn("personal api key expiring", days_left=ex["days_left"], expires=ex["expires"],
+                 source=ex["source"], error="KeyExpiryStale",
+                 detail="Declared expiry date has passed but Garmin still accepts the key - "
+                        "update GARMIN_PERSONAL_KEY_EXPIRES (or mint a new key). " + KEY_FIX, **kv)
+    elif ex["days_left"] <= KEY_WARN_DAYS:
+        (log_error if ex["days_left"] <= KEY_ERROR_DAYS else log_warn)(
+            "personal api key expiring", days_left=ex["days_left"], expires=ex["expires"],
+            source=ex["source"], error="KeyExpiring",
+            detail="Garmin Personal API key expires in %d day(s) (%s). %s"
+                   % (ex["days_left"], ex["expires"], KEY_FIX), **kv)
+    else:
+        log_info("personal api key ok", days_left=ex["days_left"], expires=ex["expires"],
+                 source=ex["source"], **kv)
+    return token
+
+
 # ---------------------------------------------------------------- HEC (per target)
 def hec_send(target, batch):
     body = "".join(json.dumps(e) for e in batch)
@@ -523,6 +674,11 @@ def main():
                           "since it doesn't cover through today.")
     ap.add_argument("--date", metavar="YYYY-MM-DD")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--check-key", action="store_true",
+                    help="Personal API preview: mint a token from GARMIN_PERSONAL_API_KEY, report the "
+                         "key's health (rejected / expiring / ok) as log lines (mirrored to Splunk if "
+                         "logging is configured), and exit 0 ok / 2 key problem / 1 transient. "
+                         "Fetches no data. Use --dry-run to keep the lines out of Splunk.")
     ap.add_argument("--reset-dedup", action="store_true")
     ap.add_argument("--generate-sample-data", action="store_true",
                     help="send synthetic 'one of each' events (synthetic=true) to test the "
@@ -540,6 +696,21 @@ def main():
 
     if args.status:
         print_status(targets); return
+
+    if args.check_key:
+        configure_hec_log(load_logging_cfg(), targets, args.dry_run)
+        t0 = time.time()
+        code = 0
+        try:
+            check_personal_key()
+        except GarminKeyError as e:
+            log_error("run failed", error=e.code, detail=e.detail, duration_s=round(time.time() - t0, 1))
+            code = 2
+        except Exception as e:
+            log_warn("key check inconclusive (transient)", error=type(e).__name__, detail=str(e))
+            code = 1
+        flush_hec_log()
+        sys.exit(code)
 
     if args.generate_sample_data:
         evs = generate_sample_events()
@@ -603,7 +774,7 @@ def main():
         sync(targets, backfill_date=args.backfill, backfill_end_date=args.backfill_end,
              single_date=args.date, dry_run=args.dry_run)
     except RuntimeError as e:
-        log.error(str(e))
+        log_error("run aborted", detail=str(e))   # was `log.error(...)` -> NameError (no `log`)
         sys.exit(1)
     except Exception:
         # sync() already logged the failure via log_error before re-raising
@@ -647,13 +818,19 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
     g = Garmin(email=email, password=pw) if (email and pw) else Garmin()
     os.makedirs(TOKENSTORE, exist_ok=True)
     os.chmod(TOKENSTORE, 0o700)
+    # Log sink goes up BEFORE login so a login failure reaches Splunk (Ingest Health "Users
+    # needing attention") — previously it raised first and only ever hit stderr.
+    configure_hec_log(load_logging_cfg(), targets, dry_run)
+    t0 = time.time()
     try:
         g.login(TOKENSTORE)
     except Exception as e:
-        raise RuntimeError(
-            f"garmin login failed ({type(e).__name__}: {e}) — set GARMIN_EMAIL/PASSWORD "
-            "(env or tools/.env) or run tools/garmin_probe.py"
-        ) from e
+        detail = (f"garmin login failed ({type(e).__name__}: {e}) — set GARMIN_EMAIL/PASSWORD "
+                  "(env or tools/.env) or run tools/garmin_probe.py")
+        log_error("run failed", error="LoginFailed", detail=detail,
+                  duration_s=round(time.time() - t0, 1))
+        flush_hec_log()
+        raise RuntimeError(detail) from e
     # A fresh login writes the token world-readable by default; lock it to 0600
     # (whatever the version named it — garmin_tokens.json or oauth*_token.json).
     try:
@@ -665,8 +842,6 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)
     sent_total, skipped, fetched_total, failed = 0, 0, 0, 0
-    configure_hec_log(load_logging_cfg(), targets, dry_run)
-    t0 = time.time()
     mode = "date" if single_date else ("backfill" if backfill_date else "incremental")
     log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=mode, targets=len(targets), days=len(dates),
              backfill_end=backfill_end_date, dry_run=dry_run)

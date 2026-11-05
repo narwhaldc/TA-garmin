@@ -1,12 +1,18 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.10` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.11` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
 > and suspended, see README §0). **This is against Garmin's API ToS and can break without notice;
 > use only for your own data.** Values are pending validation against a real synced device.
+
+> **New (2026-11): Garmin's official Personal API.** Garmin now lets any individual mint a free
+> key for their **own** data — no password, no MFA, no ToS violation. The poller does **not**
+> use it for ingest yet (still the login route above while we validate it against real data),
+> but you can already **test your key, its expiry warnings and the dashboard alerts** — see
+> [**3b. Personal API key (preview)**](#3b-garmin-personal-api-key-preview).
 
 ---
 
@@ -16,6 +22,7 @@ Setup for the Garmin data pipeline into the Wearables platform.
 3. [Install the Splunk apps](#1-install-the-splunk-apps)
 4. [Install the poller + libraries](#2-install-the-poller--libraries)
 5. [One-time Garmin auth](#3-one-time-garmin-auth)
+   - [3b. Personal API key (preview)](#3b-garmin-personal-api-key-preview) — mint, test, expiry alerts
 6. [HEC target config](#4-hec-target-config-garmin_targetsjson)
 7. [Optional: mirror ingest logs to Splunk](#4b-optional-mirror-ingest-logs-to-splunk-ingest-health-dashboard)
 8. [Populate the registries](#5-populate-the-registries-kv-store)
@@ -112,6 +119,87 @@ resumes from the same store. Override the location with `GARMIN_TOKENSTORE`.
 > store (`rm -f tools/.garminconnect/*`) and re-auth so the new backend writes its own format.
 > Garmin **429-rate-limits the login endpoint** from a repeat IP — always let the poller resume
 > the saved token; don't script a fresh login per run.
+
+## 3b. Garmin Personal API key (preview)
+Garmin's **Personal API** is the official, supported way to read **your own** Garmin Connect data.
+You mint a key once, the poller exchanges it for a short-lived token on every run, and **no
+password or MFA is ever stored**. It is for your own account only (Garmin: not for apps serving other
+people) — each person mints their **own** key.
+
+> **Status — preview.** Ingest still runs through the login route in step 3. The Personal API
+> backend is being validated against real accounts; everything in this section is for **testing
+> your key and the expiry alerting now**, so the switch-over is boring later.
+
+### Mint a key (do this yourself — it is a web login)
+1. Sign in at **https://connect.garmin.com** → **Settings → Personal API**
+   (direct: `https://connect.garmin.com/app/settings/personalApiToken`).
+2. **Create Key**, accept the terms, and choose the **1 year** expiry — that is the **maximum**
+   Garmin allows (the other choices are 30, 90 or 180 days). Pick 1 year so you re-mint as rarely
+   as possible.
+3. **Copy the key immediately — Garmin shows it only once.** If you lose it, delete it and mint another.
+4. **Write down the expiry date** (today + 1 year; the same page shows the key's status). You will
+   put it in the config below so the pipeline can warn you *before* it dies. Garmin also emails you
+   about a week ahead, but only the date you record here reaches the dashboard.
+
+### Store the key (never in the repo, never in chat)
+Either put it in `tools/.env` (gitignored) alongside the other settings:
+```bash
+GARMIN_PERSONAL_API_KEY=paste-the-key-here
+GARMIN_PERSONAL_KEY_EXPIRES=2027-11-05      # the expiry date from step 4 (YYYY-MM-DD)
+```
+…or keep it in a one-line file outside the repo (`chmod 600`) and point `GARMIN_PERSONAL_API_KEY_FILE`
+at it (default `~/.config/garmin/connect-personal-api-key`). The environment variable wins over the file.
+> `.env` files are gitignored at the repo root **and** in `tools/`. Still, run `git status` before
+> any commit and never paste the key into an issue, chat or screenshot.
+
+### Test the key (no data fetched)
+```bash
+python3 tools/garmin_to_hec.py --check-key --dry-run
+```
+It mints a token and prints one line about the key's health (`--dry-run` keeps the line out of
+Splunk; drop it to mirror the line when §4b logging is configured). Exit code: `0` key fine ·
+`2` key problem (missing/rejected — **mint a new one**) · `1` inconclusive (network/Garmin hiccup — **do not
+re-mint**, just retry). The lines you can see:
+
+| Log line | Meaning | What to do |
+|---|---|---|
+| `msg="personal api key ok" days_left=…` | Healthy | nothing |
+| `msg="personal api key ok" expires=unknown` | Works, but `GARMIN_PERSONAL_KEY_EXPIRES` is not set | add the expiry date so you get early warning |
+| `level=WARN msg="personal api key expiring" days_left=N` | ≤ 30 days left | mint a new key soon |
+| `level=ERROR msg="personal api key expiring" days_left=N` | ≤ 7 days left (or the token itself says the key ends within a day) | mint a new key **now** |
+| `level=WARN … error=KeyExpiryStale` | The declared date has passed but Garmin still accepts the key | fix `GARMIN_PERSONAL_KEY_EXPIRES` (or mint a new key) |
+| `level=ERROR msg="run failed" error=KeyRejected` | Garmin answered 401/403 — the key is expired, revoked or wrong | mint a new key (below) |
+| `level=ERROR msg="run failed" error=KeyMissing` | No key configured | store the key (above) |
+| `level=WARN msg="key check inconclusive (transient)"` | Network/TLS/Garmin error — **not** a key problem | retry later; on a macOS corporate proxy see Troubleshooting |
+
+### Renew before it expires
+Repeat *Mint a key* (a new key works immediately; the old one can stay until it lapses or you
+delete it on the same Garmin page), replace `GARMIN_PERSONAL_API_KEY`, and update
+`GARMIN_PERSONAL_KEY_EXPIRES` to the new date. Re-run `--check-key --dry-run` and confirm
+`personal api key ok` with the new `days_left`. **Put the expiry in your calendar** — a week's
+warning from Garmin plus the dashboard alerts should catch it, but a calendar entry is free.
+
+### Where it shows up in Splunk
+With §4b logging enabled, the wearables **Admin → Ingest Health** dashboard's **"Users needing
+attention"** table lists the person, the data source (`garmin`), the error (`KeyExpiring` /
+`KeyRejected` / `KeyMissing`) and a plain-English **"What needs fixing"** (which includes the
+renewal steps). A key that is expiring shows there for as long as the warning is current; once
+you renew, the next healthy check clears it. A rejected key also turns the **Feed status** row to
+FAILED and counts in the **Failed runs** and **Errors** tiles. (Needs wearables **0.4.18** or later
+for the expiring-key rows; rejected/failed runs already show on earlier versions.)
+
+### Optional: probe what your key can read
+`tools/garmin_personal_probe.py` calls each Personal API endpoint for one day and reports which
+return data and whether the field names match what this add-on reads (it prints key **names** only —
+raw JSON goes to a gitignored `tools/garmin_personal_samples*/` folder; it is your health data, so
+never commit or share it). It needs only the standard library (any Python 3.9+):
+```bash
+curl -O https://raw.githubusercontent.com/narwhaldc/TA-garmin/main/tools/garmin_personal_probe.py
+python3 garmin_personal_probe.py --token-only                       # key + token sanity check
+python3 garmin_personal_probe.py --date 2026-11-04 --history 30,365,730,1500
+python3 garmin_personal_probe.py --key-file ~/.config/garmin/other-persons-key   # a second person's key
+```
+Pick a **date the watch was worn** — a day with no sync correctly returns empty fields.
 
 ## 4. HEC target config (`garmin_targets.json`)
 Copy the example and fill in your HEC details (same format as `oura_targets.json`):
@@ -302,6 +390,8 @@ All live next to the poller (all **gitignored**):
 | `garmin_checkpoint.json` | last-run date |
 | `garmin_dedup_store.json` | per-`(sourcetype,date)` hash + `sent_to` targets |
 | `garmin_sync.lock` | concurrency lock (auto-released + removed on exit) |
+| `tools/.env` / `~/.config/garmin/connect-personal-api-key` | Personal API **key** (preview, §3b) — treat like a password; `GARMIN_PERSONAL_KEY_EXPIRES` also lives here |
+| `garmin_personal_samples*/` | probe dumps of your raw Garmin data (never commit/share) |
 
 ## Troubleshooting
 - **`no saved Garmin session`** → run step 3 (`garmin_probe.py`) first.
@@ -321,5 +411,16 @@ All live next to the poller (all **gitignored**):
   shaping; confirm the watch has actually synced that date to Garmin Connect.
 - **Re-send a date** → `--reset-dedup` (all) or `--reset-dedup --target NAME` (one target), then
   re-run with `--backfill`/`--date`.
+- **Login failures never showed in Splunk before fetcher 1.2.0** — upgrade `garmin_to_hec.py`; a failed
+  login now logs `msg="run failed" error=LoginFailed` (and appears under Ingest Health → Users
+  needing attention) instead of dying on stderr only.
+- **Personal API: `CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate`** (macOS behind a
+  corporate TLS-intercepting proxy) → the fetcher and probe already also trust the **macOS
+  keychain**, so update to the latest scripts. Otherwise point `SSL_CERT_FILE` at a CA bundle that
+  includes your proxy's root. Verification is never switched off.
+- **Personal API: token exchange `HTTP 401`** → key wrong, expired, revoked or deleted: mint a new one
+  (§3b). **Network/5xx errors are reported as "inconclusive (transient)" — don't re-mint for those.**
+- **Personal API: every endpoint comes back empty** → pick a date the watch was worn and synced; an
+  account with no device data legitimately returns empty fields for every day.
 - **Values look wrong / fields empty** → mappings are pending real-device validation; capture a
   sample (`garmin_probe.py --date <day>`) and compare keys to `default/props.conf`.

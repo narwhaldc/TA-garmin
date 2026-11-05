@@ -22,6 +22,17 @@ Optional: mirror ingest logs to Splunk (a `logging` block in `garmin_targets.jso
 
 ---
 
+> **Update 2026-11 — the picture changed.** Garmin reopened its developer program and added a
+> free, official **Personal API**: any individual mints a key for their **own** data (max 1-year
+> expiry, read-only, pull-only, no application or approval). It authenticates with a key exchanged
+> for a 24h bearer token — **no password/MFA/ToS issue** — and its endpoints are the *same internal
+> Connect services* Path B scrapes, so the field names (and this add-on's mappings) largely carry
+> over. A **preview** is in the tree: `tools/garmin_personal_probe.py` (endpoint/field check) and
+> `garmin_to_hec.py --check-key` (key health + expiry alerts into the Ingest Health dashboard) —
+> see **INSTALL §3b**. Ingest itself is still Path B until the new backend is validated against
+> real accounts. Key-expiry handling is first-class because the key must be re-minted at least yearly.
+> It is for your **own** data only (not other people's accounts, not commercial multi-user apps).
+
 ## 0. Access reality (2026-07) — READ FIRST, it forks the whole design
 
 The **official** Garmin Health API is effectively **closed to this personal project**:

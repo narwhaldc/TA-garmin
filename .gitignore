@@ -34,3 +34,5 @@ garmin_targets.json
 # never introduce a second, silently-drifting copy of the fetcher into the repo.
 tools_liz/
 **/tools_liz/
+garmin_personal_samples*/
+tools/garmin_personal_samples*/
