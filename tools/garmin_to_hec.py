@@ -59,14 +59,22 @@ from pathlib import Path
 
 try:
     import requests
-    from garminconnect import Garmin
 except Exception as e:
-    sys.exit(
-        f"cannot import deps ({e.__class__.__name__}: {e}).\n"
+    sys.exit(f"cannot import requests ({e.__class__.__name__}: {e}); run: {sys.executable} -m pip install requests")
+# garminconnect (the unofficial login backend) is OPTIONAL: GARMIN_BACKEND=personal needs only
+# requests + the stdlib (so it runs on Python 3.9 and needs no compiled deps).
+try:
+    from garminconnect import Garmin
+    _GC_IMPORT_ERR = None
+except Exception as e:
+    Garmin = None
+    _GC_IMPORT_ERR = (
+        f"cannot import garminconnect ({e.__class__.__name__}: {e}).\n"
         f"Install into THIS interpreter:\n"
         f"  {sys.executable} -m pip install garminconnect curl_cffi requests\n"
         f"If they ARE installed, a compiled dep (curl_cffi/pydantic-core) likely failed to load in\n"
-        f"this Python — use a standard Python 3.10+ (e.g. Homebrew python@3.11), not Splunk's bundled python.")
+        f"this Python — use a standard Python 3.10+ (e.g. Homebrew python@3.11), not Splunk's bundled python.\n"
+        f"(Or use GARMIN_BACKEND=personal, which does not need garminconnect.)")
 
 # ---- Splunk-friendly logging (logfmt: <ts> level=.. comp=.. msg=".." key=val) ----
 # Duplicated identically across the TA-* print-based fetchers (only _LOG_COMPONENT
@@ -78,7 +86,7 @@ except Exception as e:
 _LOG_COMPONENT = "garmin"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.2.0"
+FETCHER_VERSION = "1.3.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -295,8 +303,10 @@ def _hash(obj):
 # ---------------------------------------------------------------- shapers
 # (sourcetype, event_time_epoch, event_dict); [] when the day has no data.
 def shape_sleep(d, cal):
-    dto = (d or {}).get("dailySleepDTO") or {}
-    if not dto.get("sleepTimeSeconds"): return []
+    # login backend wraps the night in dailySleepDTO; the Personal API returns it FLAT.
+    d = d or {}
+    dto = d.get("dailySleepDTO") or d
+    if not isinstance(dto, dict) or not dto.get("sleepTimeSeconds"): return []
     ev = {k: dto.get(k) for k in ("sleepTimeSeconds", "deepSleepSeconds", "lightSleepSeconds",
           "remSleepSeconds", "awakeSleepSeconds", "napTimeSeconds", "sleepStartTimestampGMT",
           "sleepEndTimestampGMT", "calendarDate")}
@@ -459,6 +469,8 @@ def pull_day(g, cal):
             return None
         try:
             return fn(*a)
+        except GarminKeyError:
+            raise                       # a dead key fails the RUN (see sync), not one metric
         except Exception as e:
             log_warn("api call failed", method=name, date=cal, error=e.__class__.__name__); return None
     ev = []
@@ -544,6 +556,17 @@ def personal_api_key():
     return key
 
 
+_PERSONAL_OPENER = []
+
+
+def _personal_open(req, timeout=30):
+    import urllib.request
+    if not _PERSONAL_OPENER:
+        _PERSONAL_OPENER.append(urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_personal_ssl_context())))
+    return _PERSONAL_OPENER[0].open(req, timeout=timeout)
+
+
 def mint_personal_token(key):
     """Exchange the key for a 24h bearer token (the response body is the raw JWT, not JSON).
     401/403 -> GarminKeyError (rejected/expired/revoked/wrong key); anything else that fails
@@ -551,10 +574,8 @@ def mint_personal_token(key):
     import urllib.error, urllib.request
     req = urllib.request.Request(PERSONAL_BASE + PERSONAL_TOKEN_PATH, data=b"", method="POST",
                                  headers={"Authorization": "ApiKey " + key, "Accept": "*/*"})
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=_personal_ssl_context()))
     try:
-        with opener.open(req, timeout=30) as r:
+        with _personal_open(req) as r:
             tok = r.read().decode().strip()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
@@ -627,6 +648,128 @@ def check_personal_key(person_id=None, today=None):
     return token
 
 
+# ---------------------------------------------------------------- Personal API data client
+class PersonalClient:
+    """Thin GET client for the Personal API. Endpoint paths are the internal Connect services
+    (same field names as python-garminconnect returns, so the shapers below are shared).
+    204/404 -> None (no data that day). One transparent re-mint on a 401 (token ~24h; a run
+    never lasts that long, so a 401 mid-run almost always means the KEY died) and then
+    GarminKeyError. Anything else -> RuntimeError (caller logs a per-metric warning)."""
+    def __init__(self, token):
+        self.token = token
+
+    def get(self, path, params=None):
+        import urllib.error, urllib.parse, urllib.request
+        url = PERSONAL_BASE + path + (("?" + urllib.parse.urlencode(params)) if params else "")
+        for attempt in (0, 1):
+            req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self.token,
+                                                       "Accept": "application/json"})
+            try:
+                with _personal_open(req) as r:
+                    raw = r.read()
+                    if r.status == 204 or not raw.strip():
+                        return None
+                    return json.loads(raw.decode())
+            except urllib.error.HTTPError as e:
+                if e.code in (204, 404):
+                    return None
+                if e.code in (401, 403):
+                    if attempt == 0:
+                        self.token = mint_personal_token(personal_api_key())  # may raise GarminKeyError
+                        continue
+                    raise GarminKeyError("KeyRejected", "Garmin rejected the Personal API key mid-run "
+                                         "(HTTP %d). %s" % (e.code, KEY_FIX))
+                raise RuntimeError("HTTP %d from %s" % (e.code, path))
+        return None
+
+
+class LazyLogin:
+    """Logs in with the unofficial garminconnect backend only if a metric the Personal API
+    cannot deliver is actually requested (GARMIN_BACKEND=auto). Failure -> warn once, then None."""
+    def __init__(self):
+        self.g, self.failed = None, False
+
+    def get(self):
+        if self.g is None and not self.failed:
+            try:
+                self.g = login_client()
+            except Exception as e:
+                self.failed = True
+                log_warn("fallback login unavailable; login-only metrics skipped this run",
+                         error=type(e).__name__, detail=str(e))
+        return self.g
+
+
+class HybridClient:
+    """Presents the python-garminconnect method names pull_day() calls. Metrics the Personal API
+    can serve go to it; the rest go to the lazy login fallback (backend=auto) or are skipped with
+    one INFO line per run (backend=personal). A rejected KEY is never papered over by a fallback.
+    Login-only for now (paths unknown / 404 when probed 2026-11): stress, respiration, VO2max, devices."""
+    def __init__(self, personal, fallback=None):
+        self.p, self.fallback, self._noted = personal, fallback, set()
+
+    def _fb(self, name, *a):
+        if self.fallback is None:
+            if name not in self._noted:
+                self._noted.add(name)
+                log_info("metric not available via Personal API (backend=personal); skipped", method=name)
+            return None
+        g = self.fallback.get()
+        return getattr(g, name)(*a) if g is not None else None
+
+    # -- served by the Personal API
+    def get_sleep_data(self, d):     return self.p.get("/sleep-service/sleep/dailySleep", {"date": d})
+    def get_heart_rates(self, d):    return self.p.get("/wellness-service/wellness/dailyHeartRate", {"date": d})
+    def get_user_summary(self, d):   return self.p.get("/usersummary-service/usersummary/daily", {"calendarDate": d})
+    def get_spo2_data(self, d):      return self.p.get("/wellness-service/wellness/daily/spo2acclimation/%s" % d)
+    def get_hrv_data(self, d):       return self.p.get("/hrv-service/hrv/%s" % d)
+    def get_body_composition(self, d):
+        return self.p.get("/weight-service/weight/range/%s/%s" % (d, d), {"includeAll": "true"})
+    def get_fitnessage_data(self, d): return self.p.get("/fitnessage-service/fitnessage/v2/%s" % d)
+    def get_activities_by_date(self, start, end):
+        r = self.p.get("/activitylist-service/activities/search/activities",
+                       {"start": 0, "limit": 100, "startDate": start, "endDate": end})
+        return (r.get("activities") if isinstance(r, dict) else r) or []
+
+    # -- login-only
+    def get_stress_data(self, d):      return self._fb("get_stress_data", d)
+    def get_respiration_data(self, d): return self._fb("get_respiration_data", d)
+    def get_max_metrics(self, d):      return self._fb("get_max_metrics", d)
+    def get_devices(self):             return self._fb("get_devices")
+
+
+def login_client():
+    """The unofficial garminconnect backend: resume the saved token (creds in env/.env let it
+    self-heal). Raises RuntimeError with a fix-it message; tokens are locked to 0600."""
+    if Garmin is None:
+        raise RuntimeError(_GC_IMPORT_ERR)
+    email, pw = os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD")
+    g = Garmin(email=email, password=pw) if (email and pw) else Garmin()
+    os.makedirs(TOKENSTORE, exist_ok=True)
+    os.chmod(TOKENSTORE, 0o700)
+    try:
+        g.login(TOKENSTORE)
+    except Exception as e:
+        raise RuntimeError(
+            f"garmin login failed ({type(e).__name__}: {e}) — set GARMIN_EMAIL/PASSWORD "
+            "(env or tools/.env) or run tools/garmin_probe.py") from e
+    try:
+        for _fn in os.listdir(TOKENSTORE):
+            try: os.chmod(os.path.join(TOKENSTORE, _fn), 0o600)
+            except OSError: pass
+    except OSError: pass
+    return g
+
+
+def build_client(backend):
+    """backend: login | personal | auto. Logs the key's health for personal/auto (after the log
+    sink is configured). Raises GarminKeyError (key problem) or RuntimeError."""
+    if backend == "login":
+        return login_client()
+    token = check_personal_key()
+    return HybridClient(PersonalClient(token), LazyLogin() if backend == "auto" else None)
+
+
 # ---------------------------------------------------------------- HEC (per target)
 def hec_send(target, batch):
     body = "".join(json.dumps(e) for e in batch)
@@ -683,6 +826,10 @@ def main():
     ap.add_argument("--generate-sample-data", action="store_true",
                     help="send synthetic 'one of each' events (synthetic=true) to test the "
                          "pipeline without a real device; no Garmin login, no checkpoint/dedup")
+    ap.add_argument("--backend", choices=("login", "personal", "auto"),
+                    help="data source: login = unofficial garminconnect login (default, or GARMIN_BACKEND); "
+                         "personal = official Personal API key only; auto = Personal API, with the login "
+                         "method only for metrics it cannot serve. A rejected key never falls back silently.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--person", metavar="PERSON_ID",
                     help="override person_id from the targets file for all targets "
@@ -772,7 +919,7 @@ def main():
 
     try:
         sync(targets, backfill_date=args.backfill, backfill_end_date=args.backfill_end,
-             single_date=args.date, dry_run=args.dry_run)
+             single_date=args.date, dry_run=args.dry_run, backend=args.backend)
     except RuntimeError as e:
         log_error("run aborted", detail=str(e))   # was `log.error(...)` -> NameError (no `log`)
         sys.exit(1)
@@ -781,7 +928,8 @@ def main():
         sys.exit(1)
 
 
-def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, dry_run=False):
+def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, dry_run=False,
+         backend=None):
     """
     Run one Garmin fetch-and-send pass over `targets` and return
     {"sent", "skipped", "fetched", "failed"}.
@@ -814,36 +962,31 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
     # them so login() can self-heal — garminconnect's login(tokenstore) resumes a
     # valid token (no network login, no 429), and only when that fails does it do
     # a fresh login and re-save. With no creds it stays resume-only (old behavior).
-    email, pw = os.getenv("GARMIN_EMAIL"), os.getenv("GARMIN_PASSWORD")
-    g = Garmin(email=email, password=pw) if (email and pw) else Garmin()
-    os.makedirs(TOKENSTORE, exist_ok=True)
-    os.chmod(TOKENSTORE, 0o700)
-    # Log sink goes up BEFORE login so a login failure reaches Splunk (Ingest Health "Users
-    # needing attention") — previously it raised first and only ever hit stderr.
+    backend = (backend or os.getenv("GARMIN_BACKEND", "login")).strip().lower()
+    if backend not in ("login", "personal", "auto"):
+        raise RuntimeError("GARMIN_BACKEND/--backend must be login, personal or auto (got %r)" % backend)
+    # Log sink goes up BEFORE authenticating so an auth failure reaches Splunk (Ingest Health
+    # "Users needing attention") — previously it raised first and only ever hit stderr.
     configure_hec_log(load_logging_cfg(), targets, dry_run)
     t0 = time.time()
     try:
-        g.login(TOKENSTORE)
-    except Exception as e:
-        detail = (f"garmin login failed ({type(e).__name__}: {e}) — set GARMIN_EMAIL/PASSWORD "
-                  "(env or tools/.env) or run tools/garmin_probe.py")
-        log_error("run failed", error="LoginFailed", detail=detail,
+        g = build_client(backend)
+    except GarminKeyError as e:
+        log_error("run failed", error=e.code, detail=e.detail, backend=backend,
                   duration_s=round(time.time() - t0, 1))
         flush_hec_log()
-        raise RuntimeError(detail) from e
-    # A fresh login writes the token world-readable by default; lock it to 0600
-    # (whatever the version named it — garmin_tokens.json or oauth*_token.json).
-    try:
-        for _fn in os.listdir(TOKENSTORE):
-            try: os.chmod(os.path.join(TOKENSTORE, _fn), 0o600)
-            except OSError: pass
-    except OSError: pass
+        raise RuntimeError(e.detail) from e
+    except Exception as e:
+        log_error("run failed", error=("LoginFailed" if backend == "login" else "TokenExchangeFailed"),
+                  detail=str(e), backend=backend, duration_s=round(time.time() - t0, 1))
+        flush_hec_log()
+        raise RuntimeError(str(e)) from e
 
     store = load_json(DEDUP_FILE, {})
     tnames = list(targets)
     sent_total, skipped, fetched_total, failed = 0, 0, 0, 0
     mode = "date" if single_date else ("backfill" if backfill_date else "incremental")
-    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=mode, targets=len(targets), days=len(dates),
+    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, backend=backend, mode=mode, targets=len(targets), days=len(dates),
              backfill_end=backfill_end_date, dry_run=dry_run)
     try:
         for cal in dates:
@@ -877,7 +1020,7 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
                 if not dry_run:
                     store[key] = {"hash": h, "date": cal, "sent_to": sorted(set(succeeded))}
     except Exception as e:
-        log_error("run failed", error=type(e).__name__, detail=str(e),
+        log_error("run failed", error=getattr(e, "code", type(e).__name__), detail=str(e),
                   duration_s=round(time.time() - t0, 1))
         raise
 

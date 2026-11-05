@@ -1,7 +1,7 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.12` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.13` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
 > Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
 > own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
@@ -9,9 +9,10 @@ Setup for the Garmin data pipeline into the Wearables platform.
 > use only for your own data.** Values are pending validation against a real synced device.
 
 > **New (2026-11): Garmin's official Personal API.** Garmin now lets any individual mint a free
-> key for their **own** data — no password, no MFA, no ToS violation. The poller does **not**
-> use it for ingest yet (still the login route above while we validate it against real data),
-> but you can already **test your key, its expiry warnings and the dashboard alerts** — see
+> key for their **own** data — no password, no MFA, no ToS violation. The poller can ingest from it
+> as an **opt-in preview** (`GARMIN_BACKEND=personal`; the default is still the login route above
+> while we validate it against real data). You can also **test your key, its expiry warnings and
+> the dashboard alerts** on their own — see
 > [**3b. Personal API key (preview)**](#3b-garmin-personal-api-key-preview).
 
 ---
@@ -126,9 +127,10 @@ You mint a key once, the poller exchanges it for a short-lived token on every ru
 password or MFA is ever stored**. It is for your own account only (Garmin: not for apps serving other
 people) — each person mints their **own** key.
 
-> **Status — preview.** Ingest still runs through the login route in step 3. The Personal API
-> backend is being validated against real accounts; everything in this section is for **testing
-> your key and the expiry alerting now**, so the switch-over is boring later.
+> **Status — preview.** The default ingest is still the login route in step 3. The Personal API
+> backend (fetcher 1.3.0+) is opt-in and is being validated against real accounts: the plumbing,
+> auth and every endpoint it calls are exercised, but field **values** are not yet confirmed on a
+> device-bearing account. Try it with `--dry-run` first (below).
 
 ### Mint a key (do this yourself — it is a web login)
 1. Sign in at **https://connect.garmin.com** → **Settings → Personal API**
@@ -189,6 +191,35 @@ renewal steps). A key that is expiring shows there for as long as the warning is
 you renew, the next healthy check clears it. A rejected key also turns the **Feed status** row to
 FAILED and counts in the **Failed runs** and **Errors** tiles. (Needs wearables **0.4.18** or later
 for the expiring-key rows; rejected/failed runs already show on earlier versions.)
+
+### Use the Personal API for ingest (opt-in preview)
+Pick the data source with **`GARMIN_BACKEND`** in `tools/.env` (or `--backend` on the command line):
+
+| Value | What it does |
+|---|---|
+| `login` *(default)* | The unofficial garminconnect login (steps 2–3). Unchanged. |
+| `personal` | Official Personal API only — **no garminconnect, no password, any Python 3.9+** (`requests` only). A few metrics are skipped (below). |
+| `auto` | Personal API for everything it serves; the login method **only** for the metrics it cannot. Needs both a key and login credentials. |
+
+A **rejected or expired key never falls back silently** — in `personal` and `auto` alike the run
+fails with `error=KeyRejected` (shown on Ingest Health) so you notice, instead of quietly
+reverting to the password method.
+
+Try it without sending anything — pick a day the watch was worn:
+```bash
+python3 tools/garmin_to_hec.py --backend personal --dry-run --date 2026-11-04
+```
+You should see `personal api key ok`, then one `sent events` line per data type (with `--dry-run`
+nothing is actually sent). When the counts look right, set `GARMIN_BACKEND=personal` (or `auto`) in
+`tools/.env` and your cron line needs no change. To go back, set it to `login` (or remove it).
+
+**Served by the Personal API:** sleep, heart rate, daily summary (steps/calories/stress/body battery
+averages), SpO₂, HRV, body composition, fitness age (→ your age), activities.
+**Login-only for now** (skipped under `personal`, fetched via login under `auto`): per-day stress
+detail, respiration, VO₂max, device list. The skipped ones are announced once per run as
+`metric not available via Personal API`. The Personal API's field names match the login route's, so
+no mapping changes are needed — but **please report any empty or odd value**, since values are
+still being validated.
 
 ### Optional: probe what your key can read
 `tools/garmin_personal_probe.py` calls each Personal API endpoint for one day and reports which

@@ -29,8 +29,9 @@ Optional: mirror ingest logs to Splunk (a `logging` block in `garmin_targets.jso
 > Connect services* Path B scrapes, so the field names (and this add-on's mappings) largely carry
 > over. A **preview** is in the tree: `tools/garmin_personal_probe.py` (endpoint/field check) and
 > `garmin_to_hec.py --check-key` (key health + expiry alerts into the Ingest Health dashboard) —
-> see **INSTALL §3b**. Ingest itself is still Path B until the new backend is validated against
-> real accounts. Key-expiry handling is first-class because the key must be re-minted at least yearly.
+> see **INSTALL §3b**. Ingest can use it as an **opt-in preview** (`GARMIN_BACKEND=personal|auto`,
+> fetcher 1.3.0); the default is still Path B until the new backend is validated against real
+> accounts. Key-expiry handling is first-class because the key must be re-minted at least yearly.
 > It is for your **own** data only (not other people's accounts, not commercial multi-user apps).
 
 ## 0. Access reality (2026-07) — READ FIRST, it forks the whole design
