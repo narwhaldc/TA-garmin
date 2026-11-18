@@ -281,20 +281,20 @@ def history_probe(token, offsets):
         out = []
         for label, path, params in (
             ("sleep", "/sleep-service/sleep/dailySleep", {"date": day}),
-            ("dailies", "/usersummary-service/v2/dailysummaries", {"startDate": day, "endDate": day}),
+            ("dailies", "/usersummary-service/usersummary/daily", {"calendarDate": day}),
             ("hr", "/wellness-service/wellness/dailyHeartRate", {"date": day}),
         ):
             st, body, size = call(token, path, params)
             if st != 200:
                 out.append("%s=HTTP%s" % (label, st or "ERR"))
             elif label == "sleep":
-                dto = body.get("dailySleepDTO") if isinstance(body, dict) else None
+                dto = (body.get("dailySleepDTO") or body) if isinstance(body, dict) else None  # flat on Personal API
                 out.append("sleep=%s" % ("DATA" if dto and dto.get("sleepTimeSeconds") else "empty"))
             elif label == "hr":
                 hv = body.get("heartRateValues") if isinstance(body, dict) else None
                 out.append("hr=%s" % ("DATA(%d)" % len(hv) if hv else "empty"))
             else:
-                out.append("dailies=%s" % ("DATA" if has_data(body) and "totalSteps" in all_keys(body)
+                out.append("dailies=%s" % ("DATA" if isinstance(body, dict) and body.get("totalSteps") is not None
                                            else "empty"))
         print("  %5d days back (%s):  %s" % (n, day, "  ".join(out)))
 

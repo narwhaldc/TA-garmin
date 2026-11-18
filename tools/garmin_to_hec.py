@@ -86,7 +86,7 @@ except Exception as e:
 _LOG_COMPONENT = "garmin"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.3.0"
+FETCHER_VERSION = "1.3.2"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -459,6 +459,9 @@ def generate_sample_events():
     return ev
 
 
+_API_FAILS = [0]      # per-metric API failures this process; a day with any is not marked complete
+
+
 def pull_day(g, cal):
     def safe(name, *a):
         # Look the method up by name so a metric that a given garminconnect
@@ -469,9 +472,10 @@ def pull_day(g, cal):
             return None
         try:
             return fn(*a)
-        except GarminKeyError:
-            raise                       # a dead key fails the RUN (see sync), not one metric
+        except (GarminKeyError, RateLimitError):
+            raise                       # a dead key / persistent 429 fails the RUN (see sync), not one metric
         except Exception as e:
+            _API_FAILS[0] += 1
             log_warn("api call failed", method=name, date=cal, error=e.__class__.__name__); return None
     ev = []
     ev += shape_sleep(safe("get_sleep_data", cal), cal)
@@ -520,6 +524,26 @@ class GarminKeyError(RuntimeError):
     def __init__(self, code, detail):
         super().__init__(detail)
         self.code, self.detail = code, detail
+
+
+class RateLimitError(RuntimeError):
+    """Garmin kept answering HTTP 429 after backoff. Aborts the RUN (never degrades into
+    "no data for this metric") so a partial day is not recorded as done."""
+    code = "RateLimited"
+
+
+# Personal API pacing. Garmin documents no limits but DOES answer 429 (hit in practice after a
+# few hundred rapid calls), so: a small gap between calls + exponential backoff on 429.
+PERSONAL_DELAY = float(os.getenv("GARMIN_PERSONAL_DELAY", "0.4"))        # seconds between calls
+RATE_BACKOFF = [10, 30, 90, 180, 300]                                    # seconds, per retry
+_LAST_CALL = [0.0]
+
+
+def _personal_throttle():
+    gap = PERSONAL_DELAY - (time.time() - _LAST_CALL[0])
+    if gap > 0:
+        time.sleep(gap)
+    _LAST_CALL[0] = time.time()
 
 
 def _personal_ssl_context():
@@ -661,9 +685,11 @@ class PersonalClient:
     def get(self, path, params=None):
         import urllib.error, urllib.parse, urllib.request
         url = PERSONAL_BASE + path + (("?" + urllib.parse.urlencode(params)) if params else "")
-        for attempt in (0, 1):
+        remints, backoffs = 0, 0
+        while True:
             req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self.token,
                                                        "Accept": "application/json"})
+            _personal_throttle()
             try:
                 with _personal_open(req) as r:
                     raw = r.read()
@@ -673,14 +699,27 @@ class PersonalClient:
             except urllib.error.HTTPError as e:
                 if e.code in (204, 404):
                     return None
+                if e.code == 429:
+                    if backoffs >= len(RATE_BACKOFF):
+                        raise RateLimitError("Garmin Personal API rate limit (HTTP 429) persisted after %d "
+                                             "retries - wait, then re-run the same command; days already "
+                                             "sent are skipped via the dedup store" % backoffs)
+                    try:
+                        wait = min(int(e.headers.get("Retry-After", "")), 900)
+                    except (TypeError, ValueError):
+                        wait = RATE_BACKOFF[backoffs]
+                    backoffs += 1
+                    log_warn("personal api rate limited; backing off", wait_s=wait, attempt=backoffs, path=path)
+                    time.sleep(wait)
+                    continue
                 if e.code in (401, 403):
-                    if attempt == 0:
+                    if remints == 0:
+                        remints += 1
                         self.token = mint_personal_token(personal_api_key())  # may raise GarminKeyError
                         continue
                     raise GarminKeyError("KeyRejected", "Garmin rejected the Personal API key mid-run "
                                          "(HTTP %d). %s" % (e.code, KEY_FIX))
                 raise RuntimeError("HTTP %d from %s" % (e.code, path))
-        return None
 
 
 class LazyLogin:
@@ -988,10 +1027,26 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
     mode = "date" if single_date else ("backfill" if backfill_date else "incremental")
     log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, backend=backend, mode=mode, targets=len(targets), days=len(dates),
              backfill_end=backfill_end_date, dry_run=dry_run)
+    # Dedup entries older than OVERLAP+400 days are normally pruned; a long backfill must keep ITS
+    # whole range or an abort/resume would lose (and re-send) its older days.
+    prune_days = max(OVERLAP_DAYS + 400, (today - date.fromisoformat(dates[0])).days + 1) if dates else None
+    recent_cut = (today - timedelta(days=OVERLAP_DAYS + 1)).isoformat()   # age events only for recent days
+    old_cut = today - timedelta(days=OVERLAP_DAYS)       # days older than this are settled (late syncs done)
+    days_skipped, days_done = 0, 0
     try:
         for cal in dates:
+            # A settled day already fully delivered to every target is skipped WITHOUT re-fetching
+            # (backfill resume costs no API calls for finished days -> kinder to the rate limit).
+            settled = date.fromisoformat(cal) < old_cut
+            mk = store.get(f"__day__::{cal}")
+            if settled and mk and set(tnames) <= set(mk.get("sent_to", [])):
+                days_skipped += 1
+                continue
+            failed_before, api_fail_before = failed, _API_FAILS[0]
             buckets = {}
             for stype, t, ev in pull_day(g, cal):
+                if stype == "garmin:personinfo" and cal < recent_cut:
+                    continue   # fitness-age answers (chronologicalAge) for any date, incl. empty ones: no junk
                 buckets.setdefault(stype, []).append((t, ev))
             for stype, items in buckets.items():
                 fetched_total += len(items)
@@ -1019,13 +1074,25 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
                              sourcetype=stype, date=cal, count=len(items))
                 if not dry_run:
                     store[key] = {"hash": h, "date": cal, "sent_to": sorted(set(succeeded))}
+            days_done += 1
+            if not dry_run:
+                if settled and failed == failed_before and _API_FAILS[0] == api_fail_before:
+                    store[f"__day__::{cal}"] = {"date": cal, "done": datetime.datetime.now().isoformat(timespec="seconds"),
+                                                "sent_to": sorted(tnames)}
+                if days_done % 25 == 0:      # survive a hard kill / dropped ssh without losing progress
+                    save_json(DEDUP_FILE, prune_dedup_store(store, prune_days), compact=True)
     except Exception as e:
         log_error("run failed", error=getattr(e, "code", type(e).__name__), detail=str(e),
                   duration_s=round(time.time() - t0, 1))
+        if not dry_run:
+            # keep the progress made so far: a re-run then skips days already sent instead of
+            # re-sending them (the dedup store used to be written only on a clean finish)
+            save_json(DEDUP_FILE, prune_dedup_store(store, prune_days), compact=True)
+            flush_hec_log()
         raise
 
     if not dry_run:
-        store = prune_dedup_store(store)
+        store = prune_dedup_store(store, prune_days)
         save_json(DEDUP_FILE, store, compact=True)
         # Advance the checkpoint to the LATEST date this run actually covered, but NEVER
         # backward. A bounded backfill covering an old historical gap (end date earlier
@@ -1045,7 +1112,7 @@ def sync(targets, backfill_date=None, backfill_end_date=None, single_date=None, 
         cp["last_run"] = datetime.datetime.now().isoformat(timespec="seconds")
         save_json(CHECKPOINT_FILE, cp)
     log_info("run complete", events=sent_total, skipped=skipped, fetched=fetched_total,
-             failures=failed, targets=len(targets), checkpoint=cp.get("checkpoint"),
+             days_skipped=days_skipped, failures=failed, targets=len(targets), checkpoint=cp.get("checkpoint"),
              duration_s=round(time.time() - t0, 1), dry_run=dry_run)
     flush_hec_log()
     return {"sent": sent_total, "skipped": skipped, "fetched": fetched_total, "failed": failed}

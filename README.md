@@ -26,13 +26,15 @@ Optional: mirror ingest logs to Splunk (a `logging` block in `garmin_targets.jso
 > free, official **Personal API**: any individual mints a key for their **own** data (max 1-year
 > expiry, read-only, pull-only, no application or approval). It authenticates with a key exchanged
 > for a 24h bearer token — **no password/MFA/ToS issue** — and its endpoints are the *same internal
-> Connect services* Path B scrapes, so the field names (and this add-on's mappings) largely carry
-> over. A **preview** is in the tree: `tools/garmin_personal_probe.py` (endpoint/field check) and
-> `garmin_to_hec.py --check-key` (key health + expiry alerts into the Ingest Health dashboard) —
-> see **INSTALL §3b**. Ingest can use it as an **opt-in preview** (`GARMIN_BACKEND=personal|auto`,
-> fetcher 1.3.0); the default is still Path B until the new backend is validated against real
-> accounts. Key-expiry handling is first-class because the key must be re-minted at least yearly.
-> It is for your **own** data only (not other people's accounts, not commercial multi-user apps).
+> Connect services* Path B scrapes, so the field names (and this add-on's mappings) carry over.
+> **Ingest can use it today** as an opt-in (`GARMIN_BACKEND=personal|auto`, default still Path B) —
+> validated on a real device-bearing account: sleep (with score), daily totals, per-sample heart
+> rate, HRV, fitness age and workouts all flow. Known limits: **per-minute heart rate only reaches
+> back ~140 days** (daily summaries go back years), Garmin **rate-limits** (handled: pacing, backoff,
+> resumable backfills), and device list / VO2max / training readiness are not exposed. Key expiry is
+> first-class — the fetcher warns on the **Ingest Health** dashboard before the key lapses. See
+> **INSTALL §3b** (key + backend) and **§7b** (several people on one box). It is for your **own**
+> data only (not other people's accounts, not commercial multi-user apps).
 
 ## 0. Access reality (2026-07) — READ FIRST, it forks the whole design
 
@@ -218,7 +220,14 @@ DONE (v0.1.0):
    model extensions added to the `wearables` app (body_battery, stress_avg, vo2max, etc.).
 4. ✅ `TA-garmin-0_1_0.spl` packaged, Cloud AppInspect + PII-scan clean.
 
-REMAINING (when the test Garmin device syncs):
+ALSO DONE (2026-11): ✅ Personal API backend (`GARMIN_BACKEND`) with key-expiry alerts, rate-limit
+backoff + resumable backfills; ✅ validated on a real account (see the update above);
+✅ multi-person instances via the wearables master fetcher (INSTALL §7b).
+
+STILL OPEN: compose respiration/stress from the payloads the Personal API already returns, wire its
+stress + body-battery endpoints, and decide how to represent devices (no Personal API endpoint).
+
+ORIGINAL REMAINING LIST (login route; items 5-6 are now satisfied by the Personal API validation):
 5. Run `garmin_to_hec.py --backfill <a-worn-day>`; **MCP-validate each canonical field** vs
    `index=wearables sourcetype=garmin:*` (verify data-only keys absent on the null probe day).
 6. Confirm the existing dashboards light up for `vendor=garmin`; verify RBAC + Device picker

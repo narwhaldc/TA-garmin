@@ -1,19 +1,20 @@
 # TA-garmin → Splunk — Installation Guide
 
 Setup for the Garmin data pipeline into the Wearables platform.
-**App version:** TA-garmin `0.1.13` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
+**App version:** TA-garmin `0.1.14` · **Ingest:** `tools/garmin_to_hec.py` (Path B pull poller)
 
-> Ingest uses **Path B** — the unofficial `python-garminconnect` library logging in with **your
-> own** Garmin credentials to pull **your own** data (the official Health API is legal-entity-only
-> and suspended, see README §0). **This is against Garmin's API ToS and can break without notice;
-> use only for your own data.** Values are pending validation against a real synced device.
+> The default ingest is **Path B** — the unofficial `python-garminconnect` library logging in with
+> **your own** Garmin credentials to pull **your own** data (the official Health API is
+> legal-entity-only and suspended, see README §0). **This is against Garmin's API ToS and can break
+> without notice; use only for your own data.** The **official Personal API** route (below) has none
+> of those drawbacks and is now the recommended one for new setups.
 
 > **New (2026-11): Garmin's official Personal API.** Garmin now lets any individual mint a free
 > key for their **own** data — no password, no MFA, no ToS violation. The poller can ingest from it
-> as an **opt-in preview** (`GARMIN_BACKEND=personal`; the default is still the login route above
-> while we validate it against real data). You can also **test your key, its expiry warnings and
-> the dashboard alerts** on their own — see
-> [**3b. Personal API key (preview)**](#3b-garmin-personal-api-key-preview).
+> as an **opt-in** (`GARMIN_BACKEND=personal`; the default stays the login route so nothing changes
+> by accident) and it has been **validated on a real device-bearing account**. You can also **test
+> your key, its expiry warnings and the dashboard alerts** on their own — see
+> [**3b. Personal API key**](#3b-garmin-personal-api-key-preview).
 
 ---
 
@@ -127,10 +128,11 @@ You mint a key once, the poller exchanges it for a short-lived token on every ru
 password or MFA is ever stored**. It is for your own account only (Garmin: not for apps serving other
 people) — each person mints their **own** key.
 
-> **Status — preview.** The default ingest is still the login route in step 3. The Personal API
-> backend (fetcher 1.3.0+) is opt-in and is being validated against real accounts: the plumbing,
-> auth and every endpoint it calls are exercised, but field **values** are not yet confirmed on a
-> device-bearing account. Try it with `--dry-run` first (below).
+> **Status.** The default ingest is still the login route in step 3; the Personal API backend
+> (fetcher 1.3.x) is opt-in and was validated on a real account (sleep incl. score, daily totals,
+> per-sample heart rate, HRV, fitness age, workouts). Not exposed by the API: device list, VO₂max,
+> training readiness (respiration/stress are being composed from payloads already returned).
+> Try it with `--dry-run` first (below).
 
 ### Mint a key (do this yourself — it is a web login)
 1. Sign in at **https://connect.garmin.com** → **Settings → Personal API**
@@ -220,6 +222,27 @@ detail, respiration, VO₂max, device list. The skipped ones are announced once 
 `metric not available via Personal API`. The Personal API's field names match the login route's, so
 no mapping changes are needed — but **please report any empty or odd value**, since values are
 still being validated.
+
+#### Rate limits, history depth and resuming (fetcher 1.3.2+)
+- **Garmin rate-limits the Personal API** (HTTP 429 after a few hundred rapid calls) and publishes no
+  numbers. The fetcher paces itself (`GARMIN_PERSONAL_DELAY`, default 0.4 s between calls) and, on a
+  429, waits (Garmin's `Retry-After`, else 10/30/90/180/300 s) and carries on. If it is *still*
+  limited after five waits it **stops the run** (`error=RateLimited`) rather than record a half-fetched
+  day. The checkpoint is not advanced on a stop, but the days already sent **are** remembered.
+- **Resume = re-run the same command.** Days older than the overlap window that were fully delivered
+  are skipped **without any API calls**, so extending or resuming a backfill is cheap. (`--reset-dedup`
+  forgets them.)
+- **How far back?** Daily summaries (sleep, daily totals, HRV, workouts, fitness age) reach back **years**
+  (a tested account served 2023). **Per-minute heart rate reaches back only ~140 days**, and Garmin
+  keeps no longer-term copy for you: **Splunk becomes the only long-term store of per-minute HR**, so
+  keep the hourly incremental run healthy (a gap longer than ~140 days is unrecoverable).
+- **Pick the start date to match your Splunk retention.** Events older than the `wearables` index
+  retention (default Cloud setting here: ~1850 days ≈ 5 years) are discarded on arrival, so a "lifetime"
+  `--backfill` start earlier than that is wasted — raise the index retention first if you want more.
+- **Run a big backfill outside the master fetcher** (below): use `nohup` in the person's own folder so it
+  does not hold the master lock, e.g.
+  `cd ~/src/TA-garmin/tools_NAME && nohup python3.11 ./garmin_to_hec.py --backfill 2021-11-01 >> backfill.log 2>&1 < /dev/null &`
+  then `tail -f backfill.log`. Expect ~3–5 s per day, mostly empty days for dates before the account existed.
 
 ### Optional: probe what your key can read
 `tools/garmin_personal_probe.py` calls each Personal API endpoint for one day and reports which
@@ -356,6 +379,34 @@ real paths** — they are NOT literal:
 ```
 The `fcntl` lock (`garmin_sync.lock`) makes overlapping cron/manual runs safe. Overlap re-fetch
 dupes are cleaned by the `wearables` app's "Wearables Dedup" scheduled searches.
+
+## 7b. More than one person on one box
+Each extra person gets their **own folder** — a full copy of the script with **their own** `.env`
+(their key/credentials), `garmin_targets.json` (their `person_id`) and state, e.g.:
+```bash
+mkdir -p ~/src/TA-garmin/tools_NAME && chmod 700 ~/src/TA-garmin/tools_NAME
+cp ~/src/TA-garmin/tools/garmin_to_hec.py ~/src/TA-garmin/tools_NAME/
+```
+Then create that folder's `garmin_targets.json` and `.env` (`chmod 600` both; set
+`GARMIN_BACKEND=personal` there for the Personal API route).
+
+> **Never share one `.env` between people.** The fetcher reads `.env` from **its own folder** and an
+> already-set environment variable always beats `.env`. Two people in one process or one inherited
+> shell would silently fetch the wrong account's data under the wrong `person_id`. Separate folders +
+> separate processes is the isolation boundary.
+
+**Scheduling — pick one:**
+- **Own cron line + own log** (add the log to your logrotate): `29 * * * * cd /home/USER/src/TA-garmin/tools_NAME && python3.11 ./garmin_to_hec.py >> /var/log/NAME_garmin_sync.log 2>&1`
+- **Via the wearables master fetcher** (recommended if you already run it): add the person under the
+  garmin entry of `master_fetcher_config.json` —
+  `"garmin": {"interval_minutes": 60, "instances": [{"name": "NAME", "dir": "tools_NAME"}]}`.
+  Each instance runs as an **isolated subprocess** (clean environment, its own folder, its own
+  interval) and its output lands in the master log, so no new log file or logrotate entry is needed.
+  `master_fetcher.py --only garmin:NAME` runs just that person; a `--backfill` never touches an
+  instance unless it is named explicitly.
+
+Keep every copy on the same fetcher version (`grep ^FETCHER_VERSION tools*/garmin_to_hec.py`) — they
+do not update each other.
 
 ## 8. Verify
 ```
